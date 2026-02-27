@@ -519,7 +519,7 @@ export function useRouter() {
       prefetched.add(rscUrl);
       fetch(rscUrl, {
         headers: { Accept: "text/x-component" },
-        credentials: "include",
+        credentials: "same-origin",
         priority: "low" as RequestInit["priority"],
       }).then((response) => {
         if (response.ok) {
