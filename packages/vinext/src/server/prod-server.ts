@@ -241,6 +241,36 @@ function tryServeStatic(
 }
 
 /**
+ * Check if a pre-rendered HTML file exists for a given pathname.
+ * Returns the absolute file path if found, null otherwise.
+ *
+ * Checks both `/pathname.html` and `/pathname/index.html` to support
+ * both trailingSlash modes. Pre-rendered files are written during
+ * `vinext build` to dist/server/pages/.
+ */
+function resolvePrerenderedHtml(dir: string, pathname: string): string | null {
+  if (!fs.existsSync(dir)) return null;
+
+  // Normalize: "/" → "index", "/about" → "about", "/blog/post" → "blog/post"
+  const normalized = pathname === "/" ? "index" : pathname.replace(/^\//, "").replace(/\/$/, "");
+
+  // Guard against directory traversal
+  const resolvedDir = path.resolve(dir);
+
+  const directPath = path.join(dir, `${normalized}.html`);
+  if (path.resolve(directPath).startsWith(resolvedDir) && fs.existsSync(directPath) && fs.statSync(directPath).isFile()) {
+    return directPath;
+  }
+
+  const indexPath = path.join(dir, normalized, "index.html");
+  if (path.resolve(indexPath).startsWith(resolvedDir) && fs.existsSync(indexPath) && fs.statSync(indexPath).isFile()) {
+    return indexPath;
+  }
+
+  return null;
+}
+
+/**
  * Resolve the host for a request, ignoring X-Forwarded-Host to prevent
  * host header poisoning attacks (open redirects, cache poisoning).
  *
@@ -546,6 +576,15 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
       return;
     }
 
+    // Pre-rendered HTML — serve build-time rendered pages before hitting RSC/SSR
+    const appPrerenderedDir = path.join(path.dirname(rscEntryPath), "pages");
+    const appPrerenderedFile = resolvePrerenderedHtml(appPrerenderedDir, pathname);
+    if (appPrerenderedFile) {
+      const html = fs.readFileSync(appPrerenderedFile, "utf-8");
+      sendCompressed(req, res, html, "text/html; charset=utf-8", 200, {}, compress);
+      return;
+    }
+
     try {
       // Convert Node.js request to Web Request and call the RSC handler
       const request = nodeToWebRequest(req);
@@ -709,6 +748,17 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
       }
       res.writeHead(404);
       res.end("Image not found");
+      return;
+    }
+
+    // ── 1b. Pre-rendered HTML ──────────────────────────────────
+    // Check if a pre-rendered HTML file exists for this pathname.
+    // These are generated during `vinext build` for static pages.
+    const pagesPrerenderedDir = path.join(path.dirname(serverEntryPath), "pages");
+    const pagesPrerenderedFile = resolvePrerenderedHtml(pagesPrerenderedDir, pathname);
+    if (pagesPrerenderedFile) {
+      const html = fs.readFileSync(pagesPrerenderedFile, "utf-8");
+      sendCompressed(req, res, html, "text/html; charset=utf-8", 200, {}, compress);
       return;
     }
 
