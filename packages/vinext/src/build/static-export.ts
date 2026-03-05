@@ -864,3 +864,243 @@ export async function runStaticExport(
     await server.close();
   }
 }
+
+// -------------------------------------------------------------------
+// Pre-render static pages (after production build)
+// -------------------------------------------------------------------
+
+export interface PrerenderOptions {
+  root: string;
+  distDir?: string;
+}
+
+export interface PrerenderResult {
+  pageCount: number;
+  files: string[];
+  warnings: string[];
+  skipped: string[];
+}
+
+/**
+ * Pre-render static pages after a production build.
+ *
+ * Starts a temporary production server, detects static routes via a temporary
+ * Vite dev server, fetches each static page, and writes the HTML to
+ * dist/server/pages/.
+ *
+ * Prefers starting the prod server in-process via `startProdServer()`.
+ * Falls back to a subprocess when the in-process import fails (e.g. when
+ * running from compiled JS where the import path differs).
+ */
+export async function prerenderStaticPages(
+  options: PrerenderOptions,
+): Promise<PrerenderResult> {
+  const { root } = options;
+  const distDir = options.distDir ?? path.join(root, "dist");
+
+  const result: PrerenderResult = {
+    pageCount: 0,
+    files: [],
+    warnings: [],
+    skipped: [],
+  };
+
+  // Bail if dist/ doesn't exist
+  if (!fs.existsSync(distDir)) {
+    result.warnings.push("dist/ directory not found — run `vinext build` first");
+    return result;
+  }
+
+  // Detect router type from build output
+  const appRouterEntry = path.join(distDir, "server", "index.js");
+  const pagesRouterEntry = path.join(distDir, "server", "entry.js");
+  const isAppRouter = fs.existsSync(appRouterEntry);
+  const isPagesRouter = fs.existsSync(pagesRouterEntry);
+
+  if (!isAppRouter && !isPagesRouter) {
+    result.warnings.push("No server entry found in dist/ — cannot detect router type");
+    return result;
+  }
+
+  // Collect static routes using a temporary Vite dev server
+  const staticUrls = await collectStaticRoutes(root, isAppRouter);
+
+  if (staticUrls.length === 0) {
+    result.warnings.push("No static routes found — nothing to pre-render");
+    return result;
+  }
+
+  // Start temp production server in-process
+  const { startProdServer } = await import("../server/prod-server.js");
+  const server = await startProdServer({
+    port: 0, // Random available port
+    host: "127.0.0.1",
+    outDir: distDir,
+  });
+  const addr = server.address() as import("node:net").AddressInfo;
+  const port = addr.port;
+
+  try {
+    const pagesOutDir = path.join(distDir, "server", "pages");
+    fs.mkdirSync(pagesOutDir, { recursive: true });
+
+    for (const urlPath of staticUrls) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 10_000);
+        const res = await fetch(`http://127.0.0.1:${port}${urlPath}`, {
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+
+        if (!res.ok) {
+          result.skipped.push(urlPath);
+          await res.text(); // consume body
+          continue;
+        }
+
+        const html = await res.text();
+        const outputPath = getOutputPath(urlPath, false);
+        const fullPath = path.join(pagesOutDir, outputPath);
+        fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+        fs.writeFileSync(fullPath, html, "utf-8");
+
+        result.files.push(outputPath);
+        result.pageCount++;
+      } catch {
+        result.skipped.push(urlPath);
+      }
+    }
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+
+  return result;
+}
+
+/**
+ * Collect static routes by starting a temporary Vite dev server and
+ * inspecting page module exports.
+ */
+async function collectStaticRoutes(root: string, isAppRouter: boolean): Promise<string[]> {
+  // Detect source directories
+  const appDirCandidates = [
+    path.join(root, "app"),
+    path.join(root, "src", "app"),
+  ];
+  const pagesDirCandidates = [
+    path.join(root, "pages"),
+    path.join(root, "src", "pages"),
+  ];
+
+  const appDir = appDirCandidates.find((d) => fs.existsSync(d));
+  const pagesDir = pagesDirCandidates.find((d) => fs.existsSync(d));
+
+  if (isAppRouter && !appDir) return [];
+  if (!isAppRouter && !pagesDir) return [];
+
+  // Start a temporary Vite dev server for module inspection
+  const { default: vinextPlugin } = await import("../index.js");
+  const vite = await import("vite");
+  const server = await vite.createServer({
+    root,
+    configFile: false,
+    plugins: [vinextPlugin({ appDir: root })],
+    optimizeDeps: { holdUntilCrawlEnd: true },
+    server: { port: 0, cors: false },
+    logLevel: "silent",
+  });
+  await server.listen();
+
+  try {
+    const urls: string[] = [];
+
+    if (isAppRouter && appDir) {
+      const routes = await appRouter(appDir);
+      for (const route of routes) {
+        // Skip route handlers (API routes)
+        if (route.routePath && !route.pagePath) continue;
+        if (!route.pagePath) continue;
+
+        try {
+          const pageModule = await server.ssrLoadModule(route.pagePath);
+
+          // Skip force-dynamic pages
+          if (pageModule.dynamic === "force-dynamic") continue;
+
+          if (route.isDynamic) {
+            // Need generateStaticParams to expand
+            if (typeof pageModule.generateStaticParams !== "function") continue;
+
+            const parentParamSets = await resolveParentParams(route, routes, server);
+            let paramSets: Record<string, string | string[]>[];
+
+            if (parentParamSets.length > 0) {
+              paramSets = [];
+              for (const parentParams of parentParamSets) {
+                const childResults = await pageModule.generateStaticParams({ params: parentParams });
+                if (Array.isArray(childResults)) {
+                  for (const childParams of childResults) {
+                    paramSets.push({ ...parentParams, ...childParams });
+                  }
+                }
+              }
+            } else {
+              paramSets = await pageModule.generateStaticParams({ params: {} });
+            }
+
+            if (Array.isArray(paramSets)) {
+              for (const params of paramSets) {
+                urls.push(buildUrlFromParams(route.pattern, params));
+              }
+            }
+          } else {
+            urls.push(route.pattern);
+          }
+        } catch {
+          // Skip routes that fail to load
+        }
+      }
+    } else if (pagesDir) {
+      const routes = await pagesRouter(pagesDir);
+      for (const route of routes) {
+        // Skip internal pages
+        const routeName = path.basename(route.filePath, path.extname(route.filePath));
+        if (routeName.startsWith("_")) continue;
+
+        try {
+          const pageModule = await server.ssrLoadModule(route.filePath);
+
+          // Skip pages with getServerSideProps
+          if (typeof pageModule.getServerSideProps === "function") continue;
+
+          if (route.isDynamic) {
+            // Need getStaticPaths with fallback: false
+            if (typeof pageModule.getStaticPaths !== "function") continue;
+
+            const pathsResult = await pageModule.getStaticPaths({
+              locales: [],
+              defaultLocale: "",
+            });
+            if (pathsResult?.fallback !== false) continue;
+
+            const paths: Array<{ params: Record<string, string | string[]> }> =
+              pathsResult?.paths ?? [];
+            for (const { params } of paths) {
+              urls.push(buildUrlFromParams(route.pattern, params));
+            }
+          } else {
+            urls.push(route.pattern);
+          }
+        } catch {
+          // Skip routes that fail to load
+        }
+      }
+    }
+
+    return urls;
+  } finally {
+    await server.close();
+  }
+}
+
