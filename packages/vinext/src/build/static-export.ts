@@ -20,7 +20,9 @@
 import type { ViteDevServer } from "vite";
 import type { Route } from "../routing/pages-router.js";
 import type { AppRoute } from "../routing/app-router.js";
-import type { ResolvedNextConfig } from "../config/next-config.js";
+import { loadNextConfig, resolveNextConfig, type ResolvedNextConfig, type NextConfig } from "../config/next-config.js";
+import { pagesRouter, apiRouter } from "../routing/pages-router.js";
+import { appRouter } from "../routing/app-router.js";
 import { safeJsonStringify } from "../server/html.js";
 import { escapeAttr } from "../shims/head.js";
 import path from "node:path";
@@ -760,4 +762,105 @@ export async function staticExportApp(
   }
 
   return result;
+}
+
+// -------------------------------------------------------------------
+// High-level orchestrator
+// -------------------------------------------------------------------
+
+export interface RunStaticExportOptions {
+  root: string;
+  outDir?: string;
+  configOverride?: Partial<NextConfig>;
+}
+
+/**
+ * High-level orchestrator for static export.
+ *
+ * Loads next.config from the project root, detects the router type,
+ * starts a temporary Vite dev server, scans routes, runs the appropriate
+ * static export (Pages or App Router), and returns the result.
+ */
+export async function runStaticExport(
+  options: RunStaticExportOptions,
+): Promise<StaticExportResult> {
+  const { root, configOverride } = options;
+  const outDir = options.outDir ?? path.join(root, "out");
+
+  // 1. Load and resolve config
+  const loadedConfig = await loadNextConfig(root);
+  const merged: NextConfig = { ...loadedConfig, ...configOverride };
+  const config = await resolveNextConfig(merged);
+
+  // 2. Detect router type
+  const appDirCandidates = [
+    path.join(root, "app"),
+    path.join(root, "src", "app"),
+  ];
+  const pagesDirCandidates = [
+    path.join(root, "pages"),
+    path.join(root, "src", "pages"),
+  ];
+
+  const appDir = appDirCandidates.find((d) => fs.existsSync(d));
+  const pagesDir = pagesDirCandidates.find((d) => fs.existsSync(d));
+
+  if (!appDir && !pagesDir) {
+    return {
+      pageCount: 0,
+      files: [],
+      warnings: ["No app/ or pages/ directory found — nothing to export"],
+      errors: [],
+    };
+  }
+
+  // 3. Start a temporary Vite dev server
+  const { default: vinextPlugin } = await import("../index.js");
+  const vite = await import("vite");
+  const server = await vite.createServer({
+    root,
+    configFile: false,
+    plugins: [vinextPlugin({ appDir: root })],
+    optimizeDeps: { holdUntilCrawlEnd: true },
+    server: { port: 0, cors: false },
+    logLevel: "silent",
+  });
+  await server.listen();
+
+  try {
+    // 4. Clean output directory
+    fs.rmSync(outDir, { recursive: true, force: true });
+    fs.mkdirSync(outDir, { recursive: true });
+
+    // 5. Scan routes and run export
+    if (appDir) {
+      const addr = server.httpServer?.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      const baseUrl = `http://localhost:${port}`;
+
+      const routes = await appRouter(appDir);
+      return await staticExportApp({
+        baseUrl,
+        routes,
+        appDir,
+        server,
+        outDir,
+        config,
+      });
+    } else {
+      // Pages Router
+      const routes = await pagesRouter(pagesDir!);
+      const apiRoutes = await apiRouter(pagesDir!);
+      return await staticExportPages({
+        server,
+        routes,
+        apiRoutes,
+        pagesDir: pagesDir!,
+        outDir,
+        config,
+      });
+    }
+  } finally {
+    await server.close();
+  }
 }

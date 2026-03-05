@@ -270,6 +270,40 @@ async function buildApp() {
     }));
   }
 
+  // ── Static export (output: "export") ──────────────────────────
+  const { loadNextConfig, resolveNextConfig } = await import(
+    /* @vite-ignore */ "./config/next-config.js"
+  );
+  const rawConfig = await loadNextConfig(process.cwd());
+  const resolvedConfig = await resolveNextConfig(rawConfig);
+
+  if (resolvedConfig.output === "export") {
+    console.log("\n  Static export (output: 'export')...\n");
+
+    const { runStaticExport } = await import(
+      /* @vite-ignore */ "./build/static-export.js"
+    );
+
+    const result = await runStaticExport({ root: process.cwd() });
+
+    if (result.warnings.length > 0) {
+      for (const w of result.warnings) console.log(`  Warning: ${w}`);
+    }
+    if (result.errors.length > 0) {
+      for (const e of result.errors) console.error(`  Error (${e.route}): ${e.error}`);
+    }
+
+    console.log(`\n  Exported ${result.pageCount} page(s) to out/\n`);
+
+    if (result.errors.length > 0) {
+      process.exit(1);
+    }
+
+    console.log("  Static export complete. Serve with any static file server:\n");
+    console.log("    npx serve out\n");
+    return;
+  }
+
   console.log("\n  Build complete. Run `vinext start` to start the production server.\n");
 }
 
@@ -281,6 +315,21 @@ async function start() {
     root: process.cwd(),
     mode: "production",
   });
+
+  // Reject static export builds — they don't need a production server
+  const outExportDir = path.resolve(process.cwd(), "out");
+  const distServerDir = path.resolve(process.cwd(), "dist", "server");
+  if (
+    fs.existsSync(path.join(outExportDir, "index.html")) &&
+    !fs.existsSync(distServerDir)
+  ) {
+    console.error(
+      '\n  "vinext start" does not work with "output: export" configuration.',
+    );
+    console.error("  Use a static file server instead:\n");
+    console.error("    npx serve out\n");
+    process.exit(1);
+  }
 
   const port = parsed.port ?? parseInt(process.env.PORT ?? "3000", 10);
   const host = parsed.hostname ?? "0.0.0.0";
