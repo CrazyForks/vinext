@@ -122,12 +122,11 @@ export async function staticExportPages(
     }
 
     if (route.isDynamic) {
-      // Dynamic route — must have getStaticPaths
+      // Dynamic route — needs getStaticPaths to enumerate params
       if (typeof pageModule.getStaticPaths !== "function") {
-        result.errors.push({
-          route: route.pattern,
-          error: `Dynamic route requires getStaticPaths with output: 'export'`,
-        });
+        result.warnings.push(
+          `Dynamic route ${route.pattern} has no getStaticPaths() — skipping (no pages generated)`,
+        );
         continue;
       }
 
@@ -665,10 +664,9 @@ export async function staticExportApp(
         const pageModule = await server.ssrLoadModule(route.pagePath);
 
         if (typeof pageModule.generateStaticParams !== "function") {
-          result.errors.push({
-            route: route.pattern,
-            error: `Dynamic route requires generateStaticParams() with output: 'export'`,
-          });
+          result.warnings.push(
+            `Dynamic route ${route.pattern} has no generateStaticParams() — skipping (no pages generated)`,
+          );
           continue;
         }
 

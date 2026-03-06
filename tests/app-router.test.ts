@@ -1590,7 +1590,7 @@ describe("App Router Static export", () => {
     expect(html404).toContain("Page Not Found");
   });
 
-  it("reports errors for dynamic routes without generateStaticParams", async () => {
+  it("warns and skips dynamic routes without generateStaticParams", async () => {
     const { staticExportApp } = await import(
       "../packages/vinext/src/build/static-export.js"
     );
@@ -1632,9 +1632,10 @@ describe("App Router Static export", () => {
         config,
       });
 
-      // Should have an error about missing generateStaticParams
+      // Should warn (not error) about missing generateStaticParams
+      expect(result.errors).toHaveLength(0);
       expect(
-        result.errors.some((e) => e.error.includes("generateStaticParams")),
+        result.warnings.some((w) => w.includes("generateStaticParams")),
       ).toBe(true);
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
