@@ -5,6 +5,8 @@
   "scripts": {
     "build": "pnpm --filter vinext run build",
     "test": "vitest run",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
     "test:watch": "vitest",
     "generate:google-fonts": "node scripts/generate-google-fonts.js",
     "typecheck": "tsgo --noEmit",
