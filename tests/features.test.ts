@@ -1885,12 +1885,14 @@ describe("MetadataHead rendering", () => {
 
 describe("ViewportHead rendering", () => {
   let ViewportHead: typeof import("../packages/vinext/src/shims/metadata.js").ViewportHead;
+  let mergeViewport: typeof import("../packages/vinext/src/shims/metadata.js").mergeViewport;
   let React: typeof import("react");
   let renderToStaticMarkup: typeof import("react-dom/server").renderToStaticMarkup;
 
   beforeAll(async () => {
     const mod = await import("../packages/vinext/src/shims/metadata.js");
     ViewportHead = mod.ViewportHead;
+    mergeViewport = mod.mergeViewport;
     React = await import("react");
     renderToStaticMarkup = (await import("react-dom/server")).renderToStaticMarkup;
   });
@@ -1958,6 +1960,47 @@ describe("ViewportHead rendering", () => {
     );
     expect(html).toContain('name="color-scheme"');
     expect(html).toContain('content="dark"');
+  });
+
+  // mergeViewport default injection tests
+  it("mergeViewport includes default width and initialScale when not provided", () => {
+    const result = mergeViewport([{ themeColor: "#000" }]);
+    expect(result.width).toBe("device-width");
+    expect(result.initialScale).toBe(1);
+    expect(result.themeColor).toBe("#000");
+  });
+
+  it("mergeViewport allows overriding defaults", () => {
+    const result = mergeViewport([{ width: 1024, initialScale: 0.5 }]);
+    expect(result.width).toBe(1024);
+    expect(result.initialScale).toBe(0.5);
+  });
+
+  it("mergeViewport returns defaults for empty list", () => {
+    const result = mergeViewport([]);
+    expect(result.width).toBe("device-width");
+    expect(result.initialScale).toBe(1);
+  });
+
+  it("mergeViewport later entries override earlier ones including defaults", () => {
+    const result = mergeViewport([
+      { width: 800 },
+      { width: 1024, themeColor: "#fff" },
+    ]);
+    expect(result.width).toBe(1024);
+    expect(result.initialScale).toBe(1);
+    expect(result.themeColor).toBe("#fff");
+  });
+
+  it("renders viewport meta even when only themeColor is provided (defaults injected)", () => {
+    const merged = mergeViewport([{ themeColor: "#000" }]);
+    const html = renderToStaticMarkup(
+      React.createElement(ViewportHead, { viewport: merged }),
+    );
+    expect(html).toContain('name="viewport"');
+    expect(html).toContain("width=device-width");
+    expect(html).toContain("initial-scale=1");
+    expect(html).toContain('name="theme-color"');
   });
 });
 
@@ -2723,6 +2766,105 @@ describe("production server compression", () => {
 
     // PNG should not be compressed
     expect(writtenHeaders["Content-Encoding"]).toBeUndefined();
+  });
+});
+
+describe("Set-Cookie header preservation in prod-server", () => {
+  it("mergeResponseHeaders preserves multiple Set-Cookie from response", async () => {
+    const { mergeResponseHeaders } = await import(
+      "../packages/vinext/src/server/prod-server.js"
+    );
+
+    const middlewareHeaders: Record<string, string | string[]> = {};
+    const response = new Response("ok", {
+      headers: [
+        ["set-cookie", "a=1; Path=/"],
+        ["set-cookie", "b=2; Path=/"],
+        ["content-type", "text/html"],
+      ],
+    });
+
+    const merged = mergeResponseHeaders(middlewareHeaders, response);
+    expect(merged["set-cookie"]).toEqual(["a=1; Path=/", "b=2; Path=/"]);
+    expect(merged["content-type"]).toBe("text/html");
+  });
+
+  it("mergeResponseHeaders merges middleware and response Set-Cookie", async () => {
+    const { mergeResponseHeaders } = await import(
+      "../packages/vinext/src/server/prod-server.js"
+    );
+
+    const middlewareHeaders: Record<string, string | string[]> = {
+      "set-cookie": ["mw=1; Path=/"],
+    };
+    const response = new Response("ok", {
+      headers: [
+        ["set-cookie", "resp=2; Path=/"],
+      ],
+    });
+
+    const merged = mergeResponseHeaders(middlewareHeaders, response);
+    expect(merged["set-cookie"]).toEqual(["mw=1; Path=/", "resp=2; Path=/"]);
+  });
+
+  it("mergeResponseHeaders handles middleware cookie as plain string", async () => {
+    const { mergeResponseHeaders } = await import(
+      "../packages/vinext/src/server/prod-server.js"
+    );
+
+    const middlewareHeaders: Record<string, string | string[]> = {
+      "set-cookie": "mw=1; Path=/",
+    };
+    const response = new Response("ok", {
+      headers: [
+        ["set-cookie", "resp=2; Path=/"],
+      ],
+    });
+
+    const merged = mergeResponseHeaders(middlewareHeaders, response);
+    expect(merged["set-cookie"]).toEqual(["mw=1; Path=/", "resp=2; Path=/"]);
+  });
+
+  it("mergeResponseHeaders does not duplicate non-Set-Cookie headers", async () => {
+    const { mergeResponseHeaders } = await import(
+      "../packages/vinext/src/server/prod-server.js"
+    );
+
+    const middlewareHeaders: Record<string, string | string[]> = {
+      "x-custom": "from-middleware",
+    };
+    const response = new Response("ok", {
+      headers: [
+        ["x-custom", "from-response"],
+        ["content-type", "text/html"],
+      ],
+    });
+
+    const merged = mergeResponseHeaders(middlewareHeaders, response);
+    // Response headers should override middleware headers for non-Set-Cookie
+    expect(merged["x-custom"]).toBe("from-response");
+  });
+
+  it("sendCompressed passes array-valued Set-Cookie to writeHead", async () => {
+    const { sendCompressed } = await import(
+      "../packages/vinext/src/server/prod-server.js"
+    );
+
+    let writtenHeaders: Record<string, string | string[]> = {};
+    const req = { headers: {} };
+    const res = {
+      writeHead: (_status: number, headers: Record<string, string | string[]>) => {
+        writtenHeaders = headers;
+      },
+      end: () => {},
+    };
+
+    const extraHeaders: Record<string, string | string[]> = {
+      "set-cookie": ["a=1; Path=/", "b=2; Path=/"],
+    };
+
+    sendCompressed(req as any, res as any, "small body", "text/html", 200, extraHeaders, false);
+    expect(writtenHeaders["set-cookie"]).toEqual(["a=1; Path=/", "b=2; Path=/"]);
   });
 });
 

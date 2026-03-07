@@ -453,6 +453,7 @@ import {
   requestContextFromRequest,
   isExternalUrl,
   proxyExternalRequest,
+  sanitizeDestination,
 } from "vinext/config/config-matchers";
 
 // @ts-expect-error -- virtual module resolved by vinext at build time
@@ -542,12 +543,16 @@ export default {
       }
 
       // Build request context for has/missing condition matching.
-      // Created before middleware runs, matching prod-server ordering.
+      // headers and redirects run before middleware, so they use this
+      // pre-middleware snapshot. beforeFiles, afterFiles, and fallback
+      // rewrites run after middleware (App Router order), so they use
+      // postMwReqCtx created after x-middleware-request-* headers are
+      // unpacked into request.
       const reqCtx = requestContextFromRequest(request);
 
       // ── 3. Run middleware ──────────────────────────────────────────
       let resolvedUrl = urlWithQuery;
-      const middlewareHeaders: Record<string, string> = {};
+      const middlewareHeaders: Record<string, string | string[]> = {};
       let middlewareRewriteStatus: number | undefined;
       if (typeof runMiddleware === "function") {
         const result = await runMiddleware(request);
@@ -564,10 +569,22 @@ export default {
           }
         }
 
-        // Collect middleware response headers to merge into final response
+        // Collect middleware response headers to merge into final response.
+        // Use an array for Set-Cookie to preserve multiple values.
         if (result.responseHeaders) {
           for (const [key, value] of result.responseHeaders) {
-            middlewareHeaders[key] = value;
+            if (key === "set-cookie") {
+              const existing = middlewareHeaders[key];
+              if (Array.isArray(existing)) {
+                existing.push(value);
+              } else if (existing) {
+                middlewareHeaders[key] = [existing as string, value];
+              } else {
+                middlewareHeaders[key] = [value];
+              }
+            } else {
+              middlewareHeaders[key] = value;
+            }
           }
         }
 
@@ -588,7 +605,7 @@ export default {
       for (const key of Object.keys(middlewareHeaders)) {
         if (key.startsWith(mwReqPrefix)) {
           const realName = key.slice(mwReqPrefix.length);
-          mwReqHeaders[realName] = middlewareHeaders[key];
+          mwReqHeaders[realName] = middlewareHeaders[key] as string;
           delete middlewareHeaders[key];
         } else if (key.startsWith("x-middleware-")) {
           delete middlewareHeaders[key];
@@ -608,13 +625,36 @@ export default {
         });
       }
 
+      // Rebuild context after middleware has unpacked x-middleware-request-*
+      // headers into the cloned request. Used only for afterFiles and fallback
+      // rewrites, which run after middleware in the App Router execution order.
+      const postMwReqCtx = requestContextFromRequest(request);
+
       let resolvedPathname = resolvedUrl.split("?")[0];
 
       // ── 4. Apply custom headers from next.config.js ───────────────
+      // Config headers are additive for multi-value headers (Vary,
+      // Set-Cookie) and override for everything else. Vary values are
+      // comma-joined per HTTP spec. Set-Cookie values are accumulated
+      // as arrays (RFC 6265 forbids comma-joining cookies).
       if (configHeaders.length) {
         const matched = matchHeaders(resolvedPathname, configHeaders, reqCtx);
         for (const h of matched) {
-          middlewareHeaders[h.key.toLowerCase()] = h.value;
+          const lk = h.key.toLowerCase();
+          if (lk === "set-cookie") {
+            const existing = middlewareHeaders[lk];
+            if (Array.isArray(existing)) {
+              existing.push(h.value);
+            } else if (existing) {
+              middlewareHeaders[lk] = [existing as string, h.value];
+            } else {
+              middlewareHeaders[lk] = [h.value];
+            }
+          } else if (lk === "vary" && middlewareHeaders[lk]) {
+            middlewareHeaders[lk] += ", " + h.value;
+          } else {
+            middlewareHeaders[lk] = h.value;
+          }
         }
       }
 
@@ -622,9 +662,11 @@ export default {
       if (configRedirects.length) {
         const redirect = matchRedirect(resolvedPathname, configRedirects, reqCtx);
         if (redirect) {
-          const dest = basePath && !redirect.destination.startsWith(basePath)
-            ? basePath + redirect.destination
-            : redirect.destination;
+          const dest = sanitizeDestination(
+            basePath && !redirect.destination.startsWith(basePath)
+              ? basePath + redirect.destination
+              : redirect.destination,
+          );
           return new Response(null, {
             status: redirect.permanent ? 308 : 307,
             headers: { Location: dest },
@@ -634,7 +676,7 @@ export default {
 
       // ��─ 6. Apply beforeFiles rewrites from next.config.js ─────────
       if (configRewrites.beforeFiles?.length) {
-        const rewritten = matchRewrite(resolvedPathname, configRewrites.beforeFiles, reqCtx);
+        const rewritten = matchRewrite(resolvedPathname, configRewrites.beforeFiles, postMwReqCtx);
         if (rewritten) {
           if (isExternalUrl(rewritten)) {
             return proxyExternalRequest(request, rewritten);
@@ -654,7 +696,7 @@ export default {
 
       // ── 8. Apply afterFiles rewrites from next.config.js ──────────
       if (configRewrites.afterFiles?.length) {
-        const rewritten = matchRewrite(resolvedPathname, configRewrites.afterFiles, reqCtx);
+        const rewritten = matchRewrite(resolvedPathname, configRewrites.afterFiles, postMwReqCtx);
         if (rewritten) {
           if (isExternalUrl(rewritten)) {
             return proxyExternalRequest(request, rewritten);
@@ -671,7 +713,7 @@ export default {
 
         // ── 10. Fallback rewrites (if SSR returned 404) ─────────────
         if (response && response.status === 404 && configRewrites.fallback?.length) {
-          const fallbackRewrite = matchRewrite(resolvedPathname, configRewrites.fallback, reqCtx);
+          const fallbackRewrite = matchRewrite(resolvedPathname, configRewrites.fallback, postMwReqCtx);
           if (fallbackRewrite) {
             if (isExternalUrl(fallbackRewrite)) {
               return proxyExternalRequest(request, fallbackRewrite);
@@ -695,19 +737,34 @@ export default {
 
 /**
  * Merge middleware/config headers into a response.
- * Response headers take precedence over middleware headers, matching
- * the behavior in prod-server.ts.
+ * Response headers take precedence over middleware headers for all headers
+ * except Set-Cookie, which is additive (both middleware and response cookies
+ * are preserved). Matches the behavior in prod-server.ts. Uses getSetCookie()
+ * to preserve multiple Set-Cookie values.
  */
 function mergeHeaders(
   response: Response,
-  extraHeaders: Record<string, string>,
+  extraHeaders: Record<string, string | string[]>,
   statusOverride?: number,
 ): Response {
   if (!Object.keys(extraHeaders).length && !statusOverride) return response;
-  // Middleware/config headers go in first (lower precedence), then
-  // response headers overlay them (higher precedence).
-  const merged: Record<string, string> = { ...extraHeaders };
-  response.headers.forEach((v, k) => { merged[k] = v; });
+  const merged = new Headers();
+  // Middleware/config headers go in first (lower precedence)
+  for (const [k, v] of Object.entries(extraHeaders)) {
+    if (Array.isArray(v)) {
+      for (const item of v) merged.append(k, item);
+    } else {
+      merged.set(k, v);
+    }
+  }
+  // Response headers overlay them (higher precedence), except Set-Cookie
+  // which is additive (both middleware and response cookies should be sent).
+  response.headers.forEach((v, k) => {
+    if (k === "set-cookie") return;
+    merged.set(k, v);
+  });
+  const responseCookies = response.headers.getSetCookie?.() ?? [];
+  for (const cookie of responseCookies) merged.append("set-cookie", cookie);
   return new Response(response.body, {
     status: statusOverride ?? response.status,
     statusText: response.statusText,

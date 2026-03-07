@@ -213,7 +213,7 @@ import {
 } from "@vitejs/plugin-rsc/rsc";
 import { createElement, Suspense, Fragment } from "react";
 import { setNavigationContext as _setNavigationContextOrig, getNavigationContext as _getNavigationContext } from "next/navigation";
-import { setHeadersContext, headersContextFromRequest, getDraftModeCookieHeader, getAndClearPendingCookies, consumeDynamicUsage, markDynamicUsage, runWithHeadersContext, applyMiddlewareRequestHeaders } from "next/headers";
+import { setHeadersContext, headersContextFromRequest, getDraftModeCookieHeader, getAndClearPendingCookies, consumeDynamicUsage, markDynamicUsage, runWithHeadersContext, applyMiddlewareRequestHeaders, getHeadersContext } from "next/headers";
 import { NextRequest } from "next/server";
 import { ErrorBoundary, NotFoundBoundary } from "vinext/error-boundary";
 import { LayoutSegmentProvider } from "vinext/layout-segment-context";
@@ -414,7 +414,7 @@ async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, req
     }
   }
   const resolvedMetadata = metadataList.length > 0 ? mergeMetadata(metadataList) : null;
-  const resolvedViewport = viewportList.length > 0 ? mergeViewport(viewportList) : null;
+  const resolvedViewport = mergeViewport(viewportList);
 
   // Build element: metadata head + noindex meta + boundary component wrapped in layouts
   // Always include charset and default viewport for parity with Next.js.
@@ -422,8 +422,7 @@ async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, req
   const noindexMeta = createElement("meta", { name: "robots", content: "noindex" });
   const headElements = [charsetMeta, noindexMeta];
   if (resolvedMetadata) headElements.push(createElement(MetadataHead, { metadata: resolvedMetadata }));
-  const effectiveViewport = resolvedViewport ?? { width: "device-width", initialScale: 1 };
-  headElements.push(createElement(ViewportHead, { viewport: effectiveViewport }));
+  headElements.push(createElement(ViewportHead, { viewport: resolvedViewport }));
   let element = createElement(Fragment, null, ...headElements, createElement(BoundaryComponent));
   if (isRscRequest) {
     // For RSC requests (client-side navigation), wrap the element with the same
@@ -688,7 +687,7 @@ async function buildPageElement(route, params, opts, searchParams) {
     if (pageVp) viewportList.push(pageVp);
   }
   const resolvedMetadata = metadataList.length > 0 ? mergeMetadata(metadataList) : null;
-  const resolvedViewport = viewportList.length > 0 ? mergeViewport(viewportList) : null;
+  const resolvedViewport = mergeViewport(viewportList);
 
   // Build nested layout tree from outermost to innermost.
   // Next.js 16 passes params/searchParams as Promises (async pattern)
@@ -729,9 +728,7 @@ async function buildPageElement(route, params, opts, searchParams) {
     // Always emit <meta charset="utf-8"> — Next.js includes this on every page
     headElements.push(createElement("meta", { charSet: "utf-8" }));
     if (resolvedMetadata) headElements.push(createElement(MetadataHead, { metadata: resolvedMetadata }));
-    // Default viewport to standard responsive settings when none is exported
-    const effectiveViewport = resolvedViewport ?? { width: "device-width", initialScale: 1 };
-    headElements.push(createElement(ViewportHead, { viewport: effectiveViewport }));
+    headElements.push(createElement(ViewportHead, { viewport: resolvedViewport }));
     element = createElement(Fragment, null, ...headElements, element);
   }
 
@@ -1071,6 +1068,28 @@ function __buildRequestContext(request) {
   };
 }
 
+/**
+ * Build a request context from the live ALS HeadersContext, which reflects
+ * any x-middleware-request-* header mutations applied by middleware.
+ * Used for afterFiles and fallback rewrite has/missing evaluation — these
+ * run after middleware in the App Router execution order.
+ */
+function __buildPostMwRequestContext(request) {
+  const url = new URL(request.url);
+  const ctx = getHeadersContext();
+  if (!ctx) return __buildRequestContext(request);
+  // ctx.cookies is a Map<string, string> (HeadersContext), but RequestContext
+  // requires a plain Record<string, string> for has/missing cookie evaluation
+  // (config-matchers.ts uses obj[key] not Map.get()). Convert here.
+  const cookiesRecord = Object.fromEntries(ctx.cookies);
+  return {
+    headers: ctx.headers,
+    cookies: cookiesRecord,
+    query: url.searchParams,
+    host: ctx.headers.get("host") || url.host,
+  };
+}
+
 function __sanitizeDestination(dest) {
   if (dest.startsWith("http://") || dest.startsWith("https://")) return dest;
   dest = dest.replace(/^[\\\\/]+/, "/");
@@ -1248,18 +1267,41 @@ export default async function handler(request) {
         _runWithPrivateCache(() =>
           runWithFetchCache(async () => {
             const __reqCtx = __buildRequestContext(request);
-            const response = await _handleRequest(request, __reqCtx);
+            // Per-request container for middleware state. Passed into
+            // _handleRequest which fills in .headers and .status;
+            // avoids module-level variables that race on Workers.
+            const _mwCtx = { headers: null, status: null };
+            const response = await _handleRequest(request, __reqCtx, _mwCtx);
             // Apply custom headers from next.config.js to non-redirect responses.
             // Skip redirects (3xx) because Response.redirect() creates immutable headers,
             // and Next.js doesn't apply custom headers to redirects anyway.
-            if (__configHeaders.length && response && response.headers && !(response.status >= 300 && response.status < 400)) {
-              const url = new URL(request.url);
-              let pathname;
-              try { pathname = __normalizePath(decodeURIComponent(url.pathname)); } catch { pathname = url.pathname; }
-              ${bp ? `if (pathname.startsWith(${JSON.stringify(bp)})) pathname = pathname.slice(${JSON.stringify(bp)}.length) || "/";` : ""}
-              const extraHeaders = __applyConfigHeaders(pathname, __reqCtx);
-              for (const h of extraHeaders) {
-                response.headers.set(h.key, h.value);
+            if (response && response.headers && !(response.status >= 300 && response.status < 400)) {
+              if (__configHeaders.length) {
+                const url = new URL(request.url);
+                let pathname;
+                try { pathname = __normalizePath(decodeURIComponent(url.pathname)); } catch { pathname = url.pathname; }
+                ${bp ? `if (pathname.startsWith(${JSON.stringify(bp)})) pathname = pathname.slice(${JSON.stringify(bp)}.length) || "/";` : ""}
+                const extraHeaders = __applyConfigHeaders(pathname, __reqCtx);
+                for (const h of extraHeaders) {
+                  // Use append() for headers where multiple values must coexist
+                  // (Vary, Set-Cookie). Using set() on these would destroy
+                  // existing values like "Vary: RSC, Accept" which are critical
+                  // for correct CDN caching behavior.
+                  const lk = h.key.toLowerCase();
+                  if (lk === "vary" || lk === "set-cookie") {
+                    response.headers.append(h.key, h.value);
+                  } else {
+                    response.headers.set(h.key, h.value);
+                  }
+                }
+              }
+              // Merge middleware response headers into the final response.
+              // This runs at the top level so every response path (route
+              // handlers, server actions, metadata, errors, etc.) gets them.
+              if (_mwCtx.headers) {
+                for (const [key, value] of _mwCtx.headers) {
+                  response.headers.append(key, value);
+                }
               }
             }
             return response;
@@ -1270,7 +1312,7 @@ export default async function handler(request) {
   );
 }
 
-async function _handleRequest(request, __reqCtx) {
+async function _handleRequest(request, __reqCtx, _mwCtx) {
   const __reqStart = process.env.NODE_ENV !== "production" ? performance.now() : 0;
   let __compileEnd;
   let __renderEnd;
@@ -1341,28 +1383,12 @@ async function _handleRequest(request, __reqCtx) {
     }
   }
 
-  // ── Apply beforeFiles rewrites from next.config.js ────────────────────
-  if (__configRewrites.beforeFiles && __configRewrites.beforeFiles.length) {
-    // Strip .rsc suffix before matching rewrite rules — same reason as redirects above.
-    const __rewritePathname = pathname.endsWith(".rsc") ? pathname.slice(0, -4) : pathname;
-    const __rewritten = __applyConfigRewrites(__rewritePathname, __configRewrites.beforeFiles, __reqCtx);
-    if (__rewritten) {
-      if (__isExternalUrl(__rewritten)) {
-        setHeadersContext(null);
-        setNavigationContext(null);
-        return __proxyExternalRequest(request, __rewritten);
-      }
-      pathname = __rewritten;
-    }
-  }
-
   const isRscRequest = pathname.endsWith(".rsc") || request.headers.get("accept")?.includes("text/x-component");
   let cleanPathname = pathname.replace(/\\.rsc$/, "");
 
-  // Middleware response headers to merge into the final response
-  let _middlewareResponseHeaders = null;
-  // Custom status code from middleware rewrite (e.g. NextResponse.rewrite(url, { status: 403 }))
-  let _middlewareRewriteStatus = null;
+  // Middleware response headers and custom rewrite status are stored in
+  // _mwCtx (per-request container) so handler() can merge them into
+  // every response path without module-level state that races on Workers.
 
   ${middlewarePath ? `
    // Run proxy/middleware if present and path matches.
@@ -1396,10 +1422,10 @@ async function _handleRequest(request, __reqCtx) {
           // headers are kept so applyMiddlewareRequestHeaders() can unpack them;
           // the blanket strip loop after that call removes every remaining
           // x-middleware-* header before the set is merged into the response.
-           _middlewareResponseHeaders = new Headers();
+           _mwCtx.headers = new Headers();
           for (const [key, value] of mwResponse.headers) {
             if (key !== "x-middleware-next" && key !== "x-middleware-rewrite") {
-              _middlewareResponseHeaders.append(key, value);
+              _mwCtx.headers.append(key, value);
             }
           }
         } else {
@@ -1414,13 +1440,13 @@ async function _handleRequest(request, __reqCtx) {
             cleanPathname = rewriteParsed.pathname;
             // Capture custom status code from rewrite (e.g. NextResponse.rewrite(url, { status: 403 }))
             if (mwResponse.status !== 200) {
-              _middlewareRewriteStatus = mwResponse.status;
+              _mwCtx.status = mwResponse.status;
             }
             // Also save any other headers from the rewrite response
-            _middlewareResponseHeaders = new Headers();
+            _mwCtx.headers = new Headers();
             for (const [key, value] of mwResponse.headers) {
               if (key !== "x-middleware-next" && key !== "x-middleware-rewrite") {
-                _middlewareResponseHeaders.append(key, value);
+                _mwCtx.headers.append(key, value);
               }
             }
           } else {
@@ -1440,15 +1466,36 @@ async function _handleRequest(request, __reqCtx) {
   // request headers. Strip ALL x-middleware-* headers from the set that will
   // be merged into the outgoing HTTP response — this prefix is reserved for
   // internal routing signals and must never reach clients.
-  if (_middlewareResponseHeaders) {
-    applyMiddlewareRequestHeaders(_middlewareResponseHeaders);
-    for (const key of [..._middlewareResponseHeaders.keys()]) {
+  if (_mwCtx.headers) {
+    applyMiddlewareRequestHeaders(_mwCtx.headers);
+    for (const key of [..._mwCtx.headers.keys()]) {
       if (key.startsWith("x-middleware-")) {
-        _middlewareResponseHeaders.delete(key);
+        _mwCtx.headers.delete(key);
       }
     }
   }
   ` : ""}
+
+  // Build post-middleware request context for afterFiles/fallback rewrites.
+  // These run after middleware in the App Router execution order and should
+  // evaluate has/missing conditions against middleware-modified headers.
+  // When no middleware is present, this falls back to __buildRequestContext.
+  const __postMwReqCtx = __buildPostMwRequestContext(request);
+
+  // ── Apply beforeFiles rewrites from next.config.js ────────────────────
+  // In App Router execution order, beforeFiles runs after middleware so that
+  // has/missing conditions can evaluate against middleware-modified headers.
+  if (__configRewrites.beforeFiles && __configRewrites.beforeFiles.length) {
+    const __rewritten = __applyConfigRewrites(cleanPathname, __configRewrites.beforeFiles, __postMwReqCtx);
+    if (__rewritten) {
+      if (__isExternalUrl(__rewritten)) {
+        setHeadersContext(null);
+        setNavigationContext(null);
+        return __proxyExternalRequest(request, __rewritten);
+      }
+      cleanPathname = __rewritten;
+    }
+  }
 
   // ── Image optimization passthrough (dev mode — no transformation) ───────
   if (cleanPathname === "/_vinext/image") {
@@ -1675,7 +1722,7 @@ async function _handleRequest(request, __reqCtx) {
 
   // ── Apply afterFiles rewrites from next.config.js ──────────────────────
   if (__configRewrites.afterFiles && __configRewrites.afterFiles.length) {
-    const __afterRewritten = __applyConfigRewrites(cleanPathname, __configRewrites.afterFiles, __reqCtx);
+    const __afterRewritten = __applyConfigRewrites(cleanPathname, __configRewrites.afterFiles, __postMwReqCtx);
     if (__afterRewritten) {
       if (__isExternalUrl(__afterRewritten)) {
         setHeadersContext(null);
@@ -1690,7 +1737,7 @@ async function _handleRequest(request, __reqCtx) {
 
   // ── Fallback rewrites from next.config.js (if no route matched) ───────
   if (!match && __configRewrites.fallback && __configRewrites.fallback.length) {
-    const __fallbackRewritten = __applyConfigRewrites(cleanPathname, __configRewrites.fallback, __reqCtx);
+    const __fallbackRewritten = __applyConfigRewrites(cleanPathname, __configRewrites.fallback, __postMwReqCtx);
     if (__fallbackRewritten) {
       if (__isExternalUrl(__fallbackRewritten)) {
         setHeadersContext(null);
@@ -2152,12 +2199,7 @@ async function _handleRequest(request, __reqCtx) {
     } else if (revalidateSeconds) {
       responseHeaders["Cache-Control"] = "s-maxage=" + revalidateSeconds + ", stale-while-revalidate";
     }
-    // Merge middleware response headers into the RSC response
-    if (_middlewareResponseHeaders) {
-      for (const [key, value] of _middlewareResponseHeaders) {
-        responseHeaders[key] = value;
-      }
-    }
+    // Middleware response headers are merged by the handler() wrapper.
     // Attach internal timing header so the dev server middleware can log it.
     // Format: "handlerStart,compileMs,renderMs"
     //   handlerStart - absolute performance.now() when _handleRequest began,
@@ -2173,7 +2215,7 @@ async function _handleRequest(request, __reqCtx) {
       const compileMs = __compileEnd !== undefined ? Math.round(__compileEnd - __reqStart) : -1;
       responseHeaders["x-vinext-timing"] = handlerStart + "," + compileMs + ",-1";
     }
-    return new Response(rscStream, { status: _middlewareRewriteStatus || 200, headers: responseHeaders });
+    return new Response(rscStream, { status: _mwCtx.status || 200, headers: responseHeaders });
   }
 
   // Collect font data from RSC environment before passing to SSR
@@ -2225,12 +2267,7 @@ async function _handleRequest(request, __reqCtx) {
     if (fontLinkHeader) {
       response.headers.set("Link", fontLinkHeader);
     }
-    // Merge middleware response headers into the final response
-    if (_middlewareResponseHeaders) {
-      for (const [key, value] of _middlewareResponseHeaders) {
-        response.headers.append(key, value);
-      }
-    }
+    // Middleware response headers are merged by the handler() wrapper.
     // Attach internal timing header so the dev server middleware can log it.
     // Format: "handlerStart,compileMs,renderMs"
     //   handlerStart - absolute performance.now() when _handleRequest began,
@@ -2248,9 +2285,9 @@ async function _handleRequest(request, __reqCtx) {
       response.headers.set("x-vinext-timing", handlerStart + "," + compileMs + "," + renderMs);
     }
     // Apply custom status code from middleware rewrite
-    if (_middlewareRewriteStatus) {
+    if (_mwCtx.status) {
       return new Response(response.body, {
-        status: _middlewareRewriteStatus,
+        status: _mwCtx.status,
         headers: response.headers,
       });
     }

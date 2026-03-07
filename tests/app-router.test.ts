@@ -1242,6 +1242,88 @@ describe("App Router integration", () => {
   });
 });
 
+describe("App Router dev server origin check", () => {
+  let server: ViteDevServer;
+  let baseUrl: string;
+
+  beforeAll(async () => {
+    ({ server, baseUrl } = await startFixtureServer(APP_FIXTURE_DIR, { appRouter: true }));
+  }, 30000);
+
+  afterAll(async () => {
+    await server?.close();
+  });
+
+  it("allows requests with no Origin header (direct navigation)", async () => {
+    const res = await fetch(`${baseUrl}/`);
+    expect(res.status).toBe(200);
+  });
+
+  it("allows same-origin requests", async () => {
+    const res = await fetch(`${baseUrl}/`, {
+      headers: { Origin: baseUrl },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("allows requests with Origin 'null' (privacy-sensitive context)", async () => {
+    const res = await fetch(`${baseUrl}/`, {
+      headers: { Origin: "null" },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("blocks cross-origin requests", async () => {
+    const res = await fetch(`${baseUrl}/`, {
+      headers: { Origin: "http://evil.com" },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("blocks cross-origin requests to internal Vite paths (/@*)", async () => {
+    const res = await fetch(`${baseUrl}/@fs/etc/passwd`, {
+      headers: { Origin: "http://evil.com" },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("blocks requests with Sec-Fetch-Site: cross-site and no-cors mode", async () => {
+    // Node.js fetch strips Sec-Fetch-* headers (they're forbidden headers
+    // in the Fetch spec). Use raw HTTP to simulate browser behavior.
+    const http = await import("node:http");
+    const url = new URL(baseUrl);
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = http.request({
+        hostname: url.hostname,
+        port: url.port,
+        path: "/",
+        method: "GET",
+        headers: {
+          "sec-fetch-site": "cross-site",
+          "sec-fetch-mode": "no-cors",
+        },
+      }, (res) => resolve(res.statusCode ?? 0));
+      req.on("error", reject);
+      req.end();
+    });
+    expect(status).toBe(403);
+  });
+
+  it("blocks cross-origin requests to source files", async () => {
+    const res = await fetch(`${baseUrl}/app/page.tsx`, {
+      headers: { Origin: "http://evil.com" },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("blocks requests with malformed Origin header", async () => {
+    const res = await fetch(`${baseUrl}/`, {
+      headers: { Origin: "not-a-url" },
+    });
+    expect(res.status).toBe(403);
+  });
+});
+
 describe("App Router Production build", () => {
   const outDir = path.resolve(APP_FIXTURE_DIR, "dist");
 
@@ -1879,6 +1961,40 @@ describe("App Router next.config.js features (dev server integration)", () => {
     expect(html).toContain("About");
   });
 
+  // In App Router execution order, beforeFiles rewrites run after middleware.
+  // has/missing conditions on beforeFiles rules should therefore evaluate against
+  // middleware-modified headers/cookies, not the original pre-middleware request.
+  it("beforeFiles rewrite has/missing conditions see middleware-injected cookies", async () => {
+    // Without ?mw-auth, middleware does NOT inject mw-before-user=1.
+    // The has:[cookie:mw-before-user] beforeFiles rule should NOT match → no rewrite.
+    const noAuthRes = await fetch(`${baseUrl}/mw-gated-before`);
+    expect(noAuthRes.status).toBe(404);
+
+    // With ?mw-auth, middleware injects mw-before-user=1 into request cookies.
+    // The has:[cookie:mw-before-user] beforeFiles rule SHOULD match → rewrite to /about.
+    const authRes = await fetch(`${baseUrl}/mw-gated-before?mw-auth`);
+    expect(authRes.status).toBe(200);
+    const html = await authRes.text();
+    expect(html).toContain("About");
+  });
+
+  // Fallback rewrites run after middleware and after a 404 from route matching.
+  // has/missing conditions on fallback rules should evaluate against
+  // middleware-modified headers/cookies, not the original pre-middleware request.
+  it("fallback rewrite has/missing conditions see middleware-injected cookies", async () => {
+    // Without ?mw-auth, middleware does NOT inject mw-fallback-user=1.
+    // The has:[cookie:mw-fallback-user] fallback rule should NOT match → 404.
+    const noAuthRes = await fetch(`${baseUrl}/mw-gated-fallback`);
+    expect(noAuthRes.status).toBe(404);
+
+    // With ?mw-auth, middleware injects mw-fallback-user=1 into request cookies.
+    // The has:[cookie:mw-fallback-user] fallback rule SHOULD match → rewrite to /about.
+    const authRes = await fetch(`${baseUrl}/mw-gated-fallback?mw-auth`);
+    expect(authRes.status).toBe(200);
+    const html = await authRes.text();
+    expect(html).toContain("About");
+  });
+
   it("applies custom headers from next.config.js on API routes", async () => {
     const res = await fetch(`${baseUrl}/api/hello`);
     expect(res.headers.get("x-custom-header")).toBe("vinext-app");
@@ -2082,8 +2198,9 @@ describe("App Router next.config.js features (generateRscEntry)", () => {
   it("strips .rsc suffix before matching beforeFiles rewrite rules", () => {
     // RSC (soft-nav) requests arrive as /some/path.rsc but rewrite patterns
     // are defined without the extension. The generated code must strip .rsc
-    // before calling __applyConfigRewrites for beforeFiles, just like it does
-    // for redirects.
+    // before calling __applyConfigRewrites for beforeFiles.
+    // beforeFiles now runs after middleware (using __postMwReqCtx), and
+    // cleanPathname has already had .rsc stripped at that point.
     const code = generateRscEntry("/tmp/test/app", minimalRoutes, null, [], null, "", false, {
       rewrites: {
         beforeFiles: [{ source: "/old", destination: "/new" }],
@@ -2091,14 +2208,14 @@ describe("App Router next.config.js features (generateRscEntry)", () => {
         fallback: [],
       },
     });
-    // The generated code should use a .rsc-stripped pathname variable when
-    // calling __applyConfigRewrites for beforeFiles, not the raw `pathname`.
-    const rewritePathIdx = code.indexOf("__rewritePathname");
-    expect(rewritePathIdx).toBeGreaterThan(-1);
-    // The .rsc stripping assignment must appear before the beforeFiles rewrite call
-    const beforeFilesCallIdx = code.indexOf("__applyConfigRewrites(__rewritePathname");
+    // The generated code uses cleanPathname (already .rsc-stripped) when
+    // calling __applyConfigRewrites for beforeFiles.
+    const beforeFilesCallIdx = code.indexOf("__applyConfigRewrites(cleanPathname, __configRewrites.beforeFiles");
     expect(beforeFilesCallIdx).toBeGreaterThan(-1);
-    expect(rewritePathIdx).toBeLessThan(beforeFilesCallIdx);
+    // The cleanPathname assignment (stripping .rsc) must appear before the beforeFiles call
+    const cleanPathnameIdx = code.indexOf("cleanPathname = pathname.replace");
+    expect(cleanPathnameIdx).toBeGreaterThan(-1);
+    expect(cleanPathnameIdx).toBeLessThan(beforeFilesCallIdx);
   });
 
   it("applies afterFiles rewrites in the handler code", () => {
@@ -2227,7 +2344,7 @@ describe("App Router next.config.js features (generateRscEntry)", () => {
     expect(code).toContain("__safeDevHosts");
     // Should call dev origin validation inside _handleRequest
     const callSite = code.indexOf("const __originBlock = __validateDevRequestOrigin(request)");
-    const handleRequestIdx = code.indexOf("async function _handleRequest(request, __reqCtx)");
+    const handleRequestIdx = code.indexOf("async function _handleRequest(request, __reqCtx, _mwCtx)");
     expect(callSite).toBeGreaterThan(-1);
     expect(handleRequestIdx).toBeGreaterThan(-1);
     // The call should be inside the function body (after the function declaration)

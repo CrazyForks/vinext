@@ -44,6 +44,10 @@
     "./config/config-matchers": {
       "import": "./dist/config/config-matchers.js",
       "types": "./dist/config/config-matchers.d.ts"
+    },
+    "./server/worker-utils": {
+      "import": "./dist/server/worker-utils.js",
+      "types": "./dist/server/worker-utils.d.ts"
     }
   },
   "files": [

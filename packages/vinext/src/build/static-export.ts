@@ -30,8 +30,8 @@ import path from "node:path";
 import fs from "node:fs";
 import React from "react";
 import { renderToReadableStream } from "react-dom/server.edge";
+import { createValidFileMatcher, type ValidFileMatcher } from "../routing/file-matcher.js";
 
-const PAGE_EXTENSIONS = [".tsx", ".ts", ".jsx", ".js"];
 const VITE_CONFIG_FILES = ["vite.config.ts", "vite.config.js", "vite.config.mjs"];
 
 /**
@@ -71,8 +71,8 @@ async function createTempViteServer(
   return server;
 }
 
-function findFileWithExtensions(basePath: string): boolean {
-  return PAGE_EXTENSIONS.some((ext) => fs.existsSync(basePath + ext));
+function findFileWithExtensions(basePath: string, matcher: ValidFileMatcher): boolean {
+  return matcher.dottedExtensions.some((ext) => fs.existsSync(basePath + ext));
 }
 
 /**
@@ -120,6 +120,7 @@ export async function staticExportPages(
   options: StaticExportOptions,
 ): Promise<StaticExportResult> {
   const { server, routes, apiRoutes, pagesDir, outDir, config } = options;
+  const fileMatcher = createValidFileMatcher(config.pageExtensions);
   const result: StaticExportResult = {
     pageCount: 0,
     files: [],
@@ -203,7 +204,7 @@ export async function staticExportPages(
     pageProps: Record<string, unknown>;
   }> | null = null;
   const appPath = path.join(pagesDir, "_app");
-  if (findFileWithExtensions(appPath)) {
+  if (findFileWithExtensions(appPath, fileMatcher)) {
     try {
       const appModule = await server.ssrLoadModule(appPath);
       AppComponent = appModule.default ?? null;
@@ -214,7 +215,7 @@ export async function staticExportPages(
 
   let DocumentComponent: React.ComponentType | null = null;
   const docPath = path.join(pagesDir, "_document");
-  if (findFileWithExtensions(docPath)) {
+  if (findFileWithExtensions(docPath, fileMatcher)) {
     try {
       const docModule = await server.ssrLoadModule(docPath);
       DocumentComponent = docModule.default ?? null;
@@ -268,6 +269,7 @@ export async function staticExportPages(
       AppComponent,
       DocumentComponent,
       headShim,
+      fileMatcher,
     });
     if (html404) {
       const fullPath = path.join(outDir, "404.html");
@@ -438,12 +440,13 @@ interface RenderErrorPageOptions {
   DocumentComponent: React.ComponentType | null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   headShim: any;
+  fileMatcher: ValidFileMatcher;
 }
 
 async function renderErrorPage(
   options: RenderErrorPageOptions,
 ): Promise<string | null> {
-  const { server, pagesDir, statusCode, AppComponent, DocumentComponent, headShim } =
+  const { server, pagesDir, statusCode, AppComponent, DocumentComponent, headShim, fileMatcher } =
     options;
 
   const candidates =
@@ -455,7 +458,7 @@ async function renderErrorPage(
 
   for (const candidate of candidates) {
     const candidatePath = path.join(pagesDir, candidate);
-    if (!findFileWithExtensions(candidatePath)) continue;
+    if (!findFileWithExtensions(candidatePath, fileMatcher)) continue;
 
     const errorModule = await server.ssrLoadModule(candidatePath);
     const ErrorComponent = errorModule.default;

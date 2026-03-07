@@ -18,6 +18,7 @@ import {
   isPackageResolvable,
 } from "../packages/vinext/src/deploy.js";
 import { computeLazyChunks } from "../packages/vinext/src/index.js";
+import { mergeHeaders } from "../packages/vinext/src/server/worker-utils.js";
 
 // ─── Test Helpers ────────────────────────────────────────────────────────────
 
@@ -542,9 +543,35 @@ describe("generatePagesRouterWorkerEntry", () => {
     expect(content).toContain("mergeHeaders");
     expect(content).toContain("middlewareHeaders");
     // Response headers must override middleware headers (matching prod-server).
-    // mergeHeaders should spread extraHeaders first, then overlay response headers.
-    expect(content).toContain("{ ...extraHeaders }");
-    expect(content).toContain("response.headers.forEach");
+    // mergeHeaders uses Headers API and getSetCookie() to preserve multi-value cookies.
+    expect(content).toContain("merged.set(k, v)");
+    expect(content).toContain("getSetCookie");
+  });
+
+  it("mergeHeaders preserves multiple Set-Cookie headers from both middleware and response", () => {
+    // Behavioral test for the mergeHeaders function inlined in the generated worker entry.
+    // worker-utils.ts exports the same function — kept in sync with the deploy.ts template.
+    const response = new Response("body", {
+      headers: [
+        ["set-cookie", "resp=1; Path=/"],
+        ["set-cookie", "resp=2; Path=/"],
+        ["content-type", "text/html"],
+      ],
+    });
+    const extraHeaders: Record<string, string | string[]> = {
+      "set-cookie": ["mw=1; Path=/"],
+      "x-custom": "from-middleware",
+    };
+
+    const merged = mergeHeaders(response, extraHeaders);
+    const cookies = merged.headers.getSetCookie();
+    expect(cookies).toContain("mw=1; Path=/");
+    expect(cookies).toContain("resp=1; Path=/");
+    expect(cookies).toContain("resp=2; Path=/");
+    // Response takes precedence for non-Set-Cookie headers
+    expect(merged.headers.get("content-type")).toBe("text/html");
+    // Middleware-only headers are preserved
+    expect(merged.headers.get("x-custom")).toBe("from-middleware");
   });
 
   it("preserves x-middleware-request-* headers for prod request override handling", () => {

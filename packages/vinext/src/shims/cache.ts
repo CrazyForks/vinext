@@ -73,7 +73,7 @@ export interface CachedFetchValue {
     status?: number;
   };
   tags?: string[];
-  revalidate: number;
+  revalidate: number | false;
 }
 
 export interface CachedAppPageValue {
@@ -572,6 +572,25 @@ export function cacheTag(...tags: string[]): void {
 // unstable_cache — the older caching API
 // ---------------------------------------------------------------------------
 
+/**
+ * AsyncLocalStorage to track whether we're inside an unstable_cache() callback.
+ * Stored on globalThis via Symbol so headers.ts can detect the scope without
+ * a direct import (avoiding circular dependencies).
+ */
+const _UNSTABLE_CACHE_ALS_KEY = Symbol.for("vinext.unstableCache.als");
+const _unstableCacheAls = (
+  (_g[_UNSTABLE_CACHE_ALS_KEY] ??= new AsyncLocalStorage<boolean>()) as AsyncLocalStorage<boolean>
+);
+
+/**
+ * Check if the current execution context is inside an unstable_cache() callback.
+ * Used by headers(), cookies(), and connection() to throw errors when
+ * dynamic request APIs are called inside a cache scope.
+ */
+export function isInsideUnstableCacheScope(): boolean {
+  return _unstableCacheAls.getStore() === true;
+}
+
 interface UnstableCacheOptions {
   revalidate?: number | false;
   tags?: string[];
@@ -598,12 +617,13 @@ export function unstable_cache<T extends (...args: any[]) => Promise<any>>(
     const argsKey = JSON.stringify(args);
     const cacheKey = `unstable_cache:${baseKey}:${argsKey}`;
 
-    // Try to get from cache
+    // Try to get from cache. Check cacheState so time-expired entries
+    // trigger a re-fetch instead of being served indefinitely.
     const existing = await activeHandler.get(cacheKey, {
       kind: "FETCH",
       tags,
     });
-    if (existing?.value && existing.value.kind === "FETCH") {
+    if (existing?.value && existing.value.kind === "FETCH" && existing.cacheState !== "stale") {
       try {
         return JSON.parse(existing.value.data.body);
       } catch {
@@ -611,8 +631,10 @@ export function unstable_cache<T extends (...args: any[]) => Promise<any>>(
       }
     }
 
-    // Cache miss — call the function
-    const result = await fn(...args);
+    // Cache miss — call the function inside the unstable_cache ALS scope
+    // so that headers()/cookies()/connection() can detect they're in a
+    // cache scope and throw an appropriate error.
+    const result = await _unstableCacheAls.run(true, () => fn(...args));
 
     // Store in cache using the FETCH kind
     const cacheValue: CachedFetchValue = {
@@ -623,7 +645,11 @@ export function unstable_cache<T extends (...args: any[]) => Promise<any>>(
         url: cacheKey,
       },
       tags,
-      revalidate: typeof revalidateSeconds === "number" ? revalidateSeconds : 0,
+      // revalidate: false means "cache indefinitely" (no time-based expiry).
+      // A positive number means time-based revalidation in seconds.
+      // When unset (undefined), default to false (indefinite) matching
+      // Next.js behavior for unstable_cache without explicit revalidate.
+      revalidate: typeof revalidateSeconds === "number" ? revalidateSeconds : false,
     };
 
     await activeHandler.set(cacheKey, cacheValue, {
