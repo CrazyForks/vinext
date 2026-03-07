@@ -258,7 +258,7 @@ setCacheHandler(new KVCacheHandler(env.MY_KV_NAMESPACE));
 
 #### Custom Vite configuration
 
-If you need to customize the Vite config, create a `vite.config.ts`. vinext will merge its config with yours. This is required for Cloudflare Workers deployment with the App Router (RSC needs explicit plugin configuration):
+If you need to customize the Vite config, create a `vite.config.ts`. vinext will merge its config with yours. For Cloudflare Workers, adding `@cloudflare/vite-plugin` yourself is recommended when you want Cloudflare-specific local behavior such as `cloudflare:workers` bindings in dev. If an existing config is missing the plugin, `vinext deploy` can inject it for the deploy build:
 
 ```ts
 import { defineConfig } from "vite";
@@ -287,8 +287,7 @@ See the [examples](#live-examples) for complete working configurations.
 
 ### Other platforms (via Nitro)
 
-`vinext deploy` is Cloudflare-only. For other targets, use vinext with the [Nitro](https://v3.nitro.build/) Vite plugin.
-For deploying to platforms other than Cloudflare, add `nitro` alongside `vinext` in your Vite config and deploy to any [Nitro-supported platform](https://v3.nitro.build/deploy).
+`vinext deploy` is Cloudflare-only. For other targets, use vinext with the [Nitro](https://v3.nitro.build/) Vite plugin and deploy to any [Nitro-supported platform](https://v3.nitro.build/deploy).
 
 ```bash
 npm install nitro
