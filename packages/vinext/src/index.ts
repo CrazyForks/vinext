@@ -3044,6 +3044,7 @@ hydrate();
               ) {
                 const apiRoutes = await apiRouter(pagesDir, nextConfig?.pageExtensions, fileMatcher);
                 const handled = await handleApiRoute(
+                  getPagesRunner(),
                   server,
                   req,
                   res,
@@ -3082,7 +3083,7 @@ hydrate();
                 return;
               }
 
-              const handler = createSSRHandler(server, routes, pagesDir, nextConfig?.i18n, fileMatcher);
+              const handler = createSSRHandler(getPagesRunner(), server, routes, pagesDir, nextConfig?.i18n, fileMatcher);
               const mwStatus = (req as any).__vinextRewriteStatus as number | undefined;
 
               // Try rendering the resolved URL
