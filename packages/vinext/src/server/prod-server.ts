@@ -630,7 +630,7 @@ interface PagesRouterServerOptions {
  * Uses the server entry (dist/server/entry.js) which exports:
  * - renderPage(request, url, manifest) — SSR rendering (Web Request → Response)
  * - handleApiRoute(request, url) — API route handling (Web Request → Response)
- * - runMiddleware(request) — middleware execution
+ * - runMiddleware(request, ctx?) — middleware execution (ctx optional; pass for ctx.waitUntil() on Workers)
  * - vinextConfig — embedded next.config.js settings
  */
 async function startPagesRouterServer(options: PagesRouterServerOptions) {
@@ -808,7 +808,7 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
       const middlewareHeaders: Record<string, string | string[]> = {};
       let middlewareRewriteStatus: number | undefined;
       if (typeof runMiddleware === "function") {
-        const result = await runMiddleware(webRequest);
+        const result = await runMiddleware(webRequest, undefined);
 
         if (!result.continue) {
           if (result.redirectUrl) {

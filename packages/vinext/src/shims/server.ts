@@ -394,6 +394,11 @@ export class NextFetchEvent {
   waitUntil(promise: Promise<unknown>): void {
     this._waitUntilPromises.push(promise);
   }
+
+  /** Drain all waitUntil promises. Returns a single promise that settles when all are done. */
+  drainWaitUntil(): Promise<PromiseSettledResult<unknown>[]> {
+    return Promise.allSettled(this._waitUntilPromises);
+  }
 }
 
 // ---------------------------------------------------------------------------

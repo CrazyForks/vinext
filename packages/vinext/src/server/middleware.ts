@@ -21,7 +21,7 @@
 import type { ViteDevServer } from "vite";
 import fs from "node:fs";
 import path from "node:path";
-import { NextRequest } from "../shims/server.js";
+import { NextRequest, NextFetchEvent } from "../shims/server.js";
 import { safeRegExp } from "../config/config-matchers.js";
 import { normalizePath } from "./normalize-path.js";
 
@@ -273,11 +273,12 @@ export async function runMiddleware(
 
   // Wrap in NextRequest so middleware gets .nextUrl, .cookies, .geo, .ip, etc.
   const nextRequest = mwRequest instanceof NextRequest ? mwRequest : new NextRequest(mwRequest);
+  const fetchEvent = new NextFetchEvent({ page: normalizedPathname });
 
   // Execute the middleware
   let response: Response | undefined;
   try {
-    response = await middlewareFn(nextRequest);
+    response = await middlewareFn(nextRequest, fetchEvent);
   } catch (e: any) {
     console.error("[vinext] Middleware error:", e);
     const message =
@@ -291,6 +292,10 @@ export async function runMiddleware(
       }),
     };
   }
+
+  // Drain waitUntil promises (fire-and-forget: we don't block the response
+  // on these — matches platform semantics where waitUntil runs after response).
+  fetchEvent.drainWaitUntil();
 
   // No response = continue
   if (!response) {

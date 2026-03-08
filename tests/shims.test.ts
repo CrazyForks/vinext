@@ -2338,6 +2338,69 @@ describe("double-encoded path handling in middleware", () => {
 });
 
 // ---------------------------------------------------------------------------
+// NextFetchEvent — middleware receives event with waitUntil support
+
+describe("NextFetchEvent passed to middleware", () => {
+  it("runMiddleware passes NextFetchEvent as second argument", async () => {
+    const { runMiddleware } = await import(
+      "../packages/vinext/src/server/middleware.js"
+    );
+    // Middleware that accesses event.waitUntil — will throw if event is undefined
+    let receivedEvent: any;
+    const mockServer = {
+      ssrLoadModule: async () => ({
+        middleware: (req: any, event: any) => {
+          receivedEvent = event;
+          event.waitUntil(Promise.resolve("done"));
+          return new Response(null, {
+            headers: { "x-middleware-next": "1" },
+          });
+        },
+        config: { matcher: ["/test"] },
+      }),
+    };
+
+    const request = new Request("http://localhost:3000/test");
+    const result = await runMiddleware(mockServer as any, "/tmp/middleware.ts", request);
+
+    expect(result.continue).toBe(true);
+    expect(receivedEvent).toBeDefined();
+    expect(typeof receivedEvent.waitUntil).toBe("function");
+    expect(receivedEvent.sourcePage).toBe("/test");
+  });
+
+  it("waitUntil promises are drained after middleware runs", async () => {
+    const { runMiddleware } = await import(
+      "../packages/vinext/src/server/middleware.js"
+    );
+    let sideEffectRan = false;
+    const mockServer = {
+      ssrLoadModule: async () => ({
+        middleware: (_req: any, event: any) => {
+          event.waitUntil(
+            Promise.resolve().then(() => {
+              sideEffectRan = true;
+            }),
+          );
+          return new Response(null, {
+            headers: { "x-middleware-next": "1" },
+          });
+        },
+        config: { matcher: ["/drain"] },
+      }),
+    };
+
+    const request = new Request("http://localhost:3000/drain");
+    await runMiddleware(mockServer as any, "/tmp/middleware.ts", request);
+
+    // The waitUntil promise should have been resolved.
+    // Flush the microtask queue so Promise.resolve().then(...) callbacks run.
+    await new Promise((r) => queueMicrotask(r as () => void));
+    expect(sideEffectRan).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // RequestCookies comprehensive tests
 
 describe("RequestCookies API", () => {

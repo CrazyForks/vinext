@@ -468,6 +468,11 @@ interface Env {
   };
 }
 
+interface ExecutionContext {
+  waitUntil(promise: Promise<unknown>): void;
+  passThroughOnException(): void;
+}
+
 // Extract config values (embedded at build time in the server entry)
 const basePath: string = vinextConfig?.basePath ?? "";
 const trailingSlash: boolean = vinextConfig?.trailingSlash ?? false;
@@ -481,7 +486,7 @@ const imageConfig: ImageConfig | undefined = vinextConfig?.images ? {
 } : undefined;
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     try {
       const url = new URL(request.url);
       let pathname = url.pathname;
@@ -553,7 +558,7 @@ export default {
       const middlewareHeaders: Record<string, string | string[]> = {};
       let middlewareRewriteStatus: number | undefined;
       if (typeof runMiddleware === "function") {
-        const result = await runMiddleware(request);
+        const result = await runMiddleware(request, ctx);
 
         if (!result.continue) {
           if (result.redirectUrl) {

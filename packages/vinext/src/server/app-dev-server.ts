@@ -217,7 +217,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createElement, Suspense, Fragment } from "react";
 import { setNavigationContext as _setNavigationContextOrig, getNavigationContext as _getNavigationContext } from "next/navigation";
 import { setHeadersContext, headersContextFromRequest, getDraftModeCookieHeader, getAndClearPendingCookies, consumeDynamicUsage, markDynamicUsage, runWithHeadersContext, applyMiddlewareRequestHeaders, getHeadersContext } from "next/headers";
-import { NextRequest } from "next/server";
+import { NextRequest, NextFetchEvent } from "next/server";
 import { ErrorBoundary, NotFoundBoundary } from "vinext/error-boundary";
 import { LayoutSegmentProvider } from "vinext/layout-segment-context";
 import { MetadataHead, mergeMetadata, resolveModuleMetadata, ViewportHead, mergeViewport, resolveModuleViewport } from "vinext/metadata";
@@ -1488,7 +1488,9 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       mwUrl.pathname = cleanPathname;
       const mwRequest = new Request(mwUrl, request);
       const nextRequest = mwRequest instanceof NextRequest ? mwRequest : new NextRequest(mwRequest);
-      const mwResponse = await middlewareFn(nextRequest);
+      const mwFetchEvent = new NextFetchEvent({ page: cleanPathname });
+      const mwResponse = await middlewareFn(nextRequest, mwFetchEvent);
+      mwFetchEvent.drainWaitUntil();
       if (mwResponse) {
         // Check for x-middleware-next (continue)
         if (mwResponse.headers.get("x-middleware-next") === "1") {

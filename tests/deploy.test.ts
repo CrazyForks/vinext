@@ -404,7 +404,7 @@ describe("generatePagesRouterWorkerEntry", () => {
   it("generates valid TypeScript", () => {
     const content = generatePagesRouterWorkerEntry();
     expect(content).toContain("export default");
-    expect(content).toContain("async fetch(request: Request, env: Env)");
+    expect(content).toContain("async fetch(request: Request, env: Env, ctx: ExecutionContext)");
     expect(content).toContain("Promise<Response>");
   });
 
@@ -438,7 +438,7 @@ describe("generatePagesRouterWorkerEntry", () => {
   it("runs middleware before routing", () => {
     const content = generatePagesRouterWorkerEntry();
     // Middleware should appear before API route check
-    const middlewarePos = content.indexOf("runMiddleware(request)");
+    const middlewarePos = content.indexOf("runMiddleware(request, ctx)");
     const apiRoutePos = content.indexOf('resolvedPathname.startsWith("/api/")');
     expect(middlewarePos).toBeGreaterThan(-1);
     expect(apiRoutePos).toBeGreaterThan(-1);
@@ -603,7 +603,7 @@ describe("generatePagesRouterWorkerEntry", () => {
   it("builds reqCtx before middleware runs", () => {
     const content = generatePagesRouterWorkerEntry();
     const reqCtxPos = content.indexOf("requestContextFromRequest(request)");
-    const middlewarePos = content.indexOf("runMiddleware(request)");
+    const middlewarePos = content.indexOf("runMiddleware(request, ctx)");
     expect(reqCtxPos).toBeGreaterThan(-1);
     expect(middlewarePos).toBeGreaterThan(-1);
     expect(reqCtxPos).toBeLessThan(middlewarePos);
