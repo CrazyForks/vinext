@@ -8,7 +8,7 @@
  *
  * Since parseBody, parseCookies, and enhanceApiObjects are not exported,
  * all behavior is tested indirectly through handleApiRoute with a mocked
- * ViteDevServer.
+ * ModuleRunner and ViteDevServer.
  */
 import { describe, it, expect, vi } from "vitest";
 import { PassThrough } from "node:stream";
@@ -16,6 +16,7 @@ import http from "node:http";
 import { handleApiRoute } from "../packages/vinext/src/server/api-handler.js";
 import type { Route } from "../packages/vinext/src/routing/pages-router.js";
 import type { ViteDevServer } from "vite";
+import type { ModuleRunner } from "vite/module-runner";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -121,13 +122,21 @@ function route(pattern: string, filePath = "/fake/api/handler.ts"): Route {
 }
 
 /**
- * Build a minimal mock ViteDevServer with configurable ssrLoadModule behavior.
+ * Build a minimal mock ModuleRunner with configurable import behavior.
  */
-function mockServer(
+function mockRunner(
   moduleExport: Record<string, unknown>,
-): ViteDevServer {
+): ModuleRunner {
   return {
-    ssrLoadModule: vi.fn().mockResolvedValue(moduleExport),
+    import: vi.fn().mockResolvedValue(moduleExport),
+  } as unknown as ModuleRunner;
+}
+
+/**
+ * Build a minimal mock ViteDevServer (only needs ssrFixStacktrace for error handling).
+ */
+function mockServer(): ViteDevServer {
+  return {
     ssrFixStacktrace: vi.fn(),
   } as unknown as ViteDevServer;
 }
@@ -140,11 +149,13 @@ describe("handleApiRoute", () => {
   describe("route matching", () => {
     it("returns false when no route matches", async () => {
       const handler = vi.fn();
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/nonexistent");
       const res = mockRes();
 
       const handled = await handleApiRoute(
+        runner,
         server,
         req,
         res,
@@ -158,11 +169,13 @@ describe("handleApiRoute", () => {
 
     it("returns true when a route matches", async () => {
       const handler = vi.fn();
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/users");
       const res = mockRes();
 
       const handled = await handleApiRoute(
+        runner,
         server,
         req,
         res,
@@ -183,14 +196,15 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((req: any) => {
         capturedBody = req.body;
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const payload = JSON.stringify({ name: "Alice", age: 30 });
       const req = mockReq("POST", "/api/users", payload, {
         "content-type": "application/json",
       });
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/users", [
+      await handleApiRoute(runner, server, req, res, "/api/users", [
         route("/api/users"),
       ]);
 
@@ -202,13 +216,14 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((req: any) => {
         capturedBody = req.body;
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("POST", "/api/users", "{not json", {
         "content-type": "application/json",
       });
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/users", [
+      await handleApiRoute(runner, server, req, res, "/api/users", [
         route("/api/users"),
       ]);
 
@@ -220,13 +235,14 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((req: any) => {
         capturedBody = req.body;
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("POST", "/api/users", "name=Alice&role=admin", {
         "content-type": "application/x-www-form-urlencoded",
       });
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/users", [
+      await handleApiRoute(runner, server, req, res, "/api/users", [
         route("/api/users"),
       ]);
 
@@ -238,13 +254,14 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((req: any) => {
         capturedBody = req.body;
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("POST", "/api/users", "plain text body", {
         "content-type": "text/plain",
       });
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/users", [
+      await handleApiRoute(runner, server, req, res, "/api/users", [
         route("/api/users"),
       ]);
 
@@ -256,11 +273,12 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((req: any) => {
         capturedBody = req.body;
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/users");
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/users", [
+      await handleApiRoute(runner, server, req, res, "/api/users", [
         route("/api/users"),
       ]);
 
@@ -272,11 +290,12 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((req: any) => {
         capturedBody = req.body;
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("POST", "/api/users", "some data");
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/users", [
+      await handleApiRoute(runner, server, req, res, "/api/users", [
         route("/api/users"),
       ]);
 
@@ -289,7 +308,8 @@ describe("handleApiRoute", () => {
   describe("MAX_BODY_SIZE enforcement", () => {
     it("rejects bodies exceeding 1 MB with 413 status", async () => {
       const handler = vi.fn();
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
 
       // Create a stream that pushes > 1 MB.
       // Do NOT override destroy — let PassThrough's native destroy work
@@ -329,7 +349,7 @@ describe("handleApiRoute", () => {
         }
       });
 
-      await handleApiRoute(server, req, res, "/api/upload", [
+      await handleApiRoute(runner, server, req, res, "/api/upload", [
         route("/api/upload"),
       ]);
 
@@ -343,7 +363,8 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((req: any) => {
         capturedBody = req.body;
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
 
       // Send exactly 512 KB — well within the 1 MB limit
       const body = "x".repeat(512 * 1024);
@@ -352,7 +373,7 @@ describe("handleApiRoute", () => {
       });
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/upload", [
+      await handleApiRoute(runner, server, req, res, "/api/upload", [
         route("/api/upload"),
       ]);
 
@@ -369,13 +390,14 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((req: any) => {
         capturedCookies = req.cookies;
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/users", undefined, {
         cookie: "session=abc123",
       });
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/users", [
+      await handleApiRoute(runner, server, req, res, "/api/users", [
         route("/api/users"),
       ]);
 
@@ -387,13 +409,14 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((req: any) => {
         capturedCookies = req.cookies;
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/users", undefined, {
         cookie: "session=abc123; theme=dark; lang=en",
       });
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/users", [
+      await handleApiRoute(runner, server, req, res, "/api/users", [
         route("/api/users"),
       ]);
 
@@ -409,13 +432,14 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((req: any) => {
         capturedCookies = req.cookies;
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/users", undefined, {
         cookie: "token=abc=def=ghi",
       });
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/users", [
+      await handleApiRoute(runner, server, req, res, "/api/users", [
         route("/api/users"),
       ]);
 
@@ -427,11 +451,12 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((req: any) => {
         capturedCookies = req.cookies;
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/users");
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/users", [
+      await handleApiRoute(runner, server, req, res, "/api/users", [
         route("/api/users"),
       ]);
 
@@ -448,11 +473,12 @@ describe("handleApiRoute", () => {
         // Should return res for chaining
         returned.json({ ok: true });
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("POST", "/api/users");
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/users", [
+      await handleApiRoute(runner, server, req, res, "/api/users", [
         route("/api/users"),
       ]);
 
@@ -467,11 +493,12 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((_req: any, res: any) => {
         res.json({ message: "hello" });
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/users");
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/users", [
+      await handleApiRoute(runner, server, req, res, "/api/users", [
         route("/api/users"),
       ]);
 
@@ -484,11 +511,12 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((_req: any, res: any) => {
         res.json(data);
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/users");
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/users", [
+      await handleApiRoute(runner, server, req, res, "/api/users", [
         route("/api/users"),
       ]);
 
@@ -501,11 +529,12 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((_req: any, res: any) => {
         res.send({ key: "value" });
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/users");
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/users", [
+      await handleApiRoute(runner, server, req, res, "/api/users", [
         route("/api/users"),
       ]);
 
@@ -517,11 +546,12 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((_req: any, res: any) => {
         res.send("hello world");
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/users");
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/users", [
+      await handleApiRoute(runner, server, req, res, "/api/users", [
         route("/api/users"),
       ]);
 
@@ -533,11 +563,12 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((_req: any, res: any) => {
         res.send(42);
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/users");
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/users", [
+      await handleApiRoute(runner, server, req, res, "/api/users", [
         route("/api/users"),
       ]);
 
@@ -550,11 +581,12 @@ describe("handleApiRoute", () => {
         res.setHeader("Content-Type", "text/html");
         res.send("<h1>Hello</h1>");
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/page");
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/page", [
+      await handleApiRoute(runner, server, req, res, "/api/page", [
         route("/api/page"),
       ]);
 
@@ -568,11 +600,12 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((_req: any, res: any) => {
         res.send(null);
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/users");
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/users", [
+      await handleApiRoute(runner, server, req, res, "/api/users", [
         route("/api/users"),
       ]);
 
@@ -586,11 +619,12 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((_req: any, res: any) => {
         res.redirect("/dashboard");
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/login");
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/login", [
+      await handleApiRoute(runner, server, req, res, "/api/login", [
         route("/api/login"),
       ]);
 
@@ -603,11 +637,12 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((_req: any, res: any) => {
         res.redirect(301, "/new-location");
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/old");
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/old", [
+      await handleApiRoute(runner, server, req, res, "/api/old", [
         route("/api/old"),
       ]);
 
@@ -619,11 +654,12 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((_req: any, res: any) => {
         res.redirect(302, "https://external.com");
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/external");
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/external", [
+      await handleApiRoute(runner, server, req, res, "/api/external", [
         route("/api/external"),
       ]);
 
@@ -640,11 +676,12 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((req: any) => {
         capturedQuery = req.query;
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/users?page=2&limit=10");
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/users?page=2&limit=10", [
+      await handleApiRoute(runner, server, req, res, "/api/users?page=2&limit=10", [
         route("/api/users"),
       ]);
 
@@ -657,11 +694,12 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((req: any) => {
         capturedQuery = req.query;
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/users/42");
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/users/42", [
+      await handleApiRoute(runner, server, req, res, "/api/users/42", [
         route("/api/users/:id"),
       ]);
 
@@ -673,11 +711,13 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((req: any) => {
         capturedQuery = req.query;
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/users/42?fields=name,email");
       const res = mockRes();
 
       await handleApiRoute(
+        runner,
         server,
         req,
         res,
@@ -694,11 +734,12 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((req: any) => {
         capturedQuery = req.query;
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/users?tag=a&tag=b");
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/users?tag=a&tag=b", [
+      await handleApiRoute(runner, server, req, res, "/api/users?tag=a&tag=b", [
         route("/api/users"),
       ]);
 
@@ -710,11 +751,12 @@ describe("handleApiRoute", () => {
       const handler = vi.fn((req: any) => {
         capturedQuery = req.query;
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/users");
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/users", [
+      await handleApiRoute(runner, server, req, res, "/api/users", [
         route("/api/users"),
       ]);
 
@@ -726,11 +768,12 @@ describe("handleApiRoute", () => {
 
   describe("error handling", () => {
     it("returns 500 when module has no default export", async () => {
-      const server = mockServer({ notDefault: () => {} });
+      const runner = mockRunner({ notDefault: () => {} });
+      const server = mockServer();
       const req = mockReq("GET", "/api/users");
       const res = mockRes();
 
-      const handled = await handleApiRoute(server, req, res, "/api/users", [
+      const handled = await handleApiRoute(runner, server, req, res, "/api/users", [
         route("/api/users"),
       ]);
 
@@ -740,11 +783,12 @@ describe("handleApiRoute", () => {
     });
 
     it("returns 500 when default export is not a function", async () => {
-      const server = mockServer({ default: "not a function" });
+      const runner = mockRunner({ default: "not a function" });
+      const server = mockServer();
       const req = mockReq("GET", "/api/users");
       const res = mockRes();
 
-      const handled = await handleApiRoute(server, req, res, "/api/users", [
+      const handled = await handleApiRoute(runner, server, req, res, "/api/users", [
         route("/api/users"),
       ]);
 
@@ -757,11 +801,12 @@ describe("handleApiRoute", () => {
       const handler = vi.fn(() => {
         throw new Error("something broke");
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/users");
       const res = mockRes();
 
-      const handled = await handleApiRoute(server, req, res, "/api/users", [
+      const handled = await handleApiRoute(runner, server, req, res, "/api/users", [
         route("/api/users"),
       ]);
 
@@ -775,11 +820,12 @@ describe("handleApiRoute", () => {
       const handler = vi.fn(() => {
         throw error;
       });
-      const server = mockServer({ default: handler });
+      const runner = mockRunner({ default: handler });
+      const server = mockServer();
       const req = mockReq("GET", "/api/users");
       const res = mockRes();
 
-      await handleApiRoute(server, req, res, "/api/users", [
+      await handleApiRoute(runner, server, req, res, "/api/users", [
         route("/api/users"),
       ]);
 
