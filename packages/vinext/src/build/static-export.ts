@@ -808,13 +808,12 @@ export async function staticExportApp(
   }
 
   // Render 404 page
+  const ctrl404 = new AbortController();
+  const t404 = setTimeout(() => ctrl404.abort(), 30_000);
   try {
-    const ctrl404 = new AbortController();
-    const t404 = setTimeout(() => ctrl404.abort(), 30_000);
     const res = await fetch(`${baseUrl}/__nonexistent_page_for_404__`, {
       signal: ctrl404.signal,
     });
-    clearTimeout(t404);
     if (res.status === 404) {
       const html = await res.text();
       if (html.length > 0) {
@@ -822,10 +821,16 @@ export async function staticExportApp(
         fs.writeFileSync(fullPath, html, "utf-8");
         result.files.push("404.html");
         result.pageCount++;
+      } else {
+        await res.body?.cancel();
       }
+    } else {
+      await res.body?.cancel();
     }
   } catch {
     // No custom 404, skip
+  } finally {
+    clearTimeout(t404);
   }
 
   return result;
