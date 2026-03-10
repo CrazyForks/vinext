@@ -309,11 +309,24 @@ function tryServeStatic(
  */
 function resolvePrerenderedHtml(dir: string, pathname: string): string | null {
   // Normalize: "/" → "index", "/about" → "about", "/blog/post" → "blog/post"
+  //
+  // Note on the root path ("/"):
+  //   normalized = "index"
+  //   directPath = <dir>/index.html   ← written by getOutputPath for trailingSlash:false
+  //   indexPath  = <dir>/index/index.html  ← this is WRONG for "/"
+  //
+  // The directPath branch handles "/" correctly because getOutputPath always
+  // writes the root as "index.html". The indexPath branch (trailingSlash:true
+  // fallback) would look for "index/index.html" which is never written — it is
+  // effectively dead for the root path. Do not change the normalized value for
+  // "/" without also updating getOutputPath and the indexPath lookup below.
   const normalized = pathname === "/" ? "index" : pathname.replace(/^\//, "").replace(/\/$/, "");
 
-  // Guard against directory traversal
+  // Guard against directory traversal (defence-in-depth; pathname is always a
+  // request URL that starts with "/" so path.resolve can't escape this dir).
   const resolvedDir = path.resolve(dir);
 
+  // trailingSlash:false → written as <normalized>.html
   const directPath = path.join(dir, `${normalized}.html`);
   if (
     path.resolve(directPath).startsWith(resolvedDir + path.sep) &&
@@ -323,6 +336,8 @@ function resolvePrerenderedHtml(dir: string, pathname: string): string | null {
     return directPath;
   }
 
+  // trailingSlash:true → written as <normalized>/index.html
+  // (Not reachable for pathname === "/" — see note above.)
   const indexPath = path.join(dir, normalized, "index.html");
   if (
     path.resolve(indexPath).startsWith(resolvedDir + path.sep) &&

@@ -595,6 +595,10 @@ export function getOutputPath(urlPath: string, trailingSlash: boolean, outDir: s
 
   const resolved = path.resolve(outDir, relative);
   const resolvedOutDir = path.resolve(outDir);
+  // Defence-in-depth: for URL inputs this check never fires because
+  // path.posix.normalize on any path starting with "/" cannot produce a
+  // segment above "/". The guard exists for non-URL callers (e.g. custom
+  // generateStaticParams values on Windows where path.sep differs).
   if (!resolved.startsWith(resolvedOutDir + path.sep)) {
     throw new Error(`Output path "${urlPath}" escapes the output directory`);
   }
@@ -842,6 +846,16 @@ export async function staticExportApp(
       }
 
       const html = await res.text();
+      const contentType = res.headers.get("content-type") ?? "";
+      if (!contentType.includes("text/html")) {
+        // Non-HTML response (e.g. a JSON response from a misclassified route).
+        // Writing it as .html would produce a corrupt file — record as error.
+        result.errors.push({
+          route: urlPath,
+          error: `Expected text/html but got "${contentType}" — skipping`,
+        });
+        continue;
+      }
       const outputPath = getOutputPath(urlPath, config.trailingSlash, outDir);
       const fullPath = path.join(outDir, outputPath);
       fs.mkdirSync(path.dirname(fullPath), { recursive: true });
@@ -1028,7 +1042,6 @@ export async function prerenderStaticPages(options: PrerenderOptions): Promise<P
   if (options.config) {
     config = options.config;
   } else {
-    const { loadNextConfig, resolveNextConfig } = await import("../config/next-config.js");
     config = await resolveNextConfig(await loadNextConfig(root));
   }
 
