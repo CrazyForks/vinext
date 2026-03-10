@@ -337,8 +337,6 @@ async function buildApp() {
   }
 
   // ── Pre-render static pages (non-export builds) ────────────────
-  console.log("  Pre-rendering static pages...\n");
-
   const { prerenderStaticPages } = await import(/* @vite-ignore */ "./build/static-export.js");
 
   const prerenderResult = await prerenderStaticPages({ root: process.cwd() });
@@ -346,11 +344,13 @@ async function buildApp() {
   if (prerenderResult.warnings.length > 0) {
     for (const w of prerenderResult.warnings) console.log(`  Warning: ${w}`);
   }
-  if (prerenderResult.skipped.length > 0) {
-    console.log(`  Skipped ${prerenderResult.skipped.length} route(s) (dynamic or errored)`);
-  }
 
-  if (prerenderResult.pageCount > 0) {
+  // prerenderStaticPages returns early for App Router builds (pageCount 0, no skipped).
+  // Only print pre-render progress when the function actually ran.
+  if (prerenderResult.pageCount > 0 || prerenderResult.skipped.length > 0) {
+    if (prerenderResult.skipped.length > 0) {
+      console.log(`  Skipped ${prerenderResult.skipped.length} route(s) (dynamic or errored)`);
+    }
     console.log(`\n  Pre-rendered ${prerenderResult.pageCount} static page(s)\n`);
   }
 
@@ -367,12 +367,16 @@ async function start() {
   });
 
   // Reject static export builds — they don't need a production server.
-  // A static export produces out/ and no dist/ directory; detect this cheaply
-  // via filesystem presence rather than loading/resolving next.config.js at
-  // runtime (the config is already baked into the build output at this point).
+  // A static export produces out/ but no dist/server/entry.js (the Pages
+  // Router production entry). Check for the absence of the entry specifically
+  // rather than relying on the coarser "dist/ exists" heuristic, which
+  // false-positives when the project has an unrelated out/ directory (e.g.
+  // TypeScript's outDir: "out").
+  const distServerEntry = path.resolve(process.cwd(), "dist", "server", "entry.js");
+  const distServerIndex = path.resolve(process.cwd(), "dist", "server", "index.js");
   const hasOutDir = fs.existsSync(path.resolve(process.cwd(), "out"));
-  const hasDistDir = fs.existsSync(path.resolve(process.cwd(), "dist"));
-  if (hasOutDir && !hasDistDir) {
+  const hasDistServer = fs.existsSync(distServerEntry) || fs.existsSync(distServerIndex);
+  if (hasOutDir && !hasDistServer) {
     console.error('\n  "vinext start" does not work with "output: export" configuration.');
     console.error("  Use a static file server instead:\n");
     console.error("    npx serve out\n");

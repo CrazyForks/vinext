@@ -211,7 +211,6 @@ describe("Static export — App Router (served via HTTP)", () => {
     await staticExportApp({
       baseUrl: viteBaseUrl,
       routes,
-      appDir,
       server: viteServer,
       outDir: exportDir,
       config,

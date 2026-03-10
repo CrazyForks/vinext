@@ -1661,7 +1661,6 @@ describe("App Router Static export", () => {
     const result = await staticExportApp({
       baseUrl,
       routes,
-      appDir,
       server,
       outDir: exportDir,
       config,
@@ -1731,7 +1730,6 @@ describe("App Router Static export", () => {
       const result = await staticExportApp({
         baseUrl,
         routes: fakeRoutes,
-        appDir: path.resolve(APP_FIXTURE_DIR, "app"),
         server,
         outDir: tempDir,
         config,
@@ -1779,7 +1777,6 @@ describe("App Router Static export", () => {
       const result = await staticExportApp({
         baseUrl,
         routes: fakeRoutes,
-        appDir: path.resolve(APP_FIXTURE_DIR, "app"),
         server,
         outDir: tempDir,
         config,

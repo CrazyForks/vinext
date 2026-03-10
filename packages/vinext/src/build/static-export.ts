@@ -734,8 +734,6 @@ export interface AppStaticExportOptions {
   baseUrl: string;
   /** Discovered app routes */
   routes: AppRoute[];
-  /** App directory path (for loading modules to call generateStaticParams) */
-  appDir: string;
   /** Vite dev server (for loading page modules) */
   server: ViteDevServer;
   /** Output directory */
@@ -902,10 +900,18 @@ export async function runStaticExport(
   const { root, configOverride } = options;
   const outDir = options.outDir ?? path.join(root, "out");
 
-  // 1. Load and resolve config (reuse caller's config if provided)
+  // 1. Load and resolve config (reuse caller's config if provided, but always
+  //    apply configOverride on top so callers can force e.g. output: "export")
   let config: ResolvedNextConfig;
   if (options.config) {
-    config = options.config;
+    if (configOverride && Object.keys(configOverride).length > 0) {
+      // Apply the override directly on the already-resolved config. The
+      // typical fields in configOverride (output, trailingSlash) are scalars
+      // that need no further resolution, so a shallow merge is sufficient.
+      config = { ...options.config, ...configOverride } as ResolvedNextConfig;
+    } else {
+      config = options.config;
+    }
   } else {
     const loadedConfig = await loadNextConfig(root);
     const merged: NextConfig = { ...loadedConfig, ...configOverride };
@@ -949,7 +955,6 @@ export async function runStaticExport(
       return await staticExportApp({
         baseUrl,
         routes,
-        appDir,
         server,
         outDir,
         config,
