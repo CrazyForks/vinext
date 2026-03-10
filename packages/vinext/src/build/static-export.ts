@@ -776,8 +776,10 @@ export async function staticExportApp(
 
   // Fetch each URL from the dev server and write HTML
   for (const urlPath of urlsToRender) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30_000);
     try {
-      const res = await fetch(`${baseUrl}${urlPath}`);
+      const res = await fetch(`${baseUrl}${urlPath}`, { signal: controller.signal });
       if (!res.ok) {
         result.errors.push({
           route: urlPath,
@@ -800,12 +802,19 @@ export async function staticExportApp(
         route: urlPath,
         error: (e as Error).message,
       });
+    } finally {
+      clearTimeout(timer);
     }
   }
 
   // Render 404 page
   try {
-    const res = await fetch(`${baseUrl}/__nonexistent_page_for_404__`);
+    const ctrl404 = new AbortController();
+    const t404 = setTimeout(() => ctrl404.abort(), 30_000);
+    const res = await fetch(`${baseUrl}/__nonexistent_page_for_404__`, {
+      signal: ctrl404.signal,
+    });
+    clearTimeout(t404);
     if (res.status === 404) {
       const html = await res.text();
       if (html.length > 0) {
@@ -1001,6 +1010,10 @@ export async function prerenderStaticPages(options: PrerenderOptions): Promise<P
     outDir: distDir,
   });
   const addr = server.address() as import("node:net").AddressInfo;
+  if (!addr || addr.port === 0) {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    throw new Error("Production server failed to bind to a port for pre-rendering");
+  }
   const port = addr.port;
 
   try {
@@ -1058,10 +1071,14 @@ async function collectStaticRoutesFromSource(root: string): Promise<CollectedRou
   const urls: string[] = [];
   const skipped: string[] = [];
 
-  // Patterns that indicate a page has server-side data fetching
+  // Patterns that indicate a page has server-side data fetching.
+  // Intentionally broad (may match comments/strings) — false positives
+  // only cause a static page to be skipped, which is safe. False negatives
+  // (missing a GSSP page) would cause a broken pre-render.
+  // Note: export const revalidate is an App Router convention. Pages Router
+  // uses getStaticProps returning { revalidate }, so we don't check it here.
   const gsspPattern =
     /export\s+(async\s+)?function\s+getServerSideProps|export\s+(const|let|var)\s+getServerSideProps/;
-  const revalidateZeroPattern = /export\s+const\s+revalidate\s*=\s*0\b/;
 
   for (const route of routes) {
     const routeName = path.basename(route.filePath, path.extname(route.filePath));
@@ -1077,11 +1094,6 @@ async function collectStaticRoutesFromSource(root: string): Promise<CollectedRou
 
       if (gsspPattern.test(source)) {
         skipped.push(`${route.pattern} (getServerSideProps)`);
-        continue;
-      }
-
-      if (revalidateZeroPattern.test(source)) {
-        skipped.push(`${route.pattern} (revalidate: 0)`);
         continue;
       }
 

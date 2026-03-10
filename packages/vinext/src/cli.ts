@@ -366,13 +366,13 @@ async function start() {
     mode: "production",
   });
 
-  // Reject static export builds — they don't need a production server
-  const { loadNextConfig, resolveNextConfig } = await import(
-    /* @vite-ignore */ "./config/next-config.js"
-  );
-  const rawConfig = await loadNextConfig(process.cwd());
-  const resolvedConfig = await resolveNextConfig(rawConfig);
-  if (resolvedConfig.output === "export") {
+  // Reject static export builds — they don't need a production server.
+  // A static export produces out/ and no dist/ directory; detect this cheaply
+  // via filesystem presence rather than loading/resolving next.config.js at
+  // runtime (the config is already baked into the build output at this point).
+  const hasOutDir = fs.existsSync(path.resolve(process.cwd(), "out"));
+  const hasDistDir = fs.existsSync(path.resolve(process.cwd(), "dist"));
+  if (hasOutDir && !hasDistDir) {
     console.error('\n  "vinext start" does not work with "output: export" configuration.');
     console.error("  Use a static file server instead:\n");
     console.error("    npx serve out\n");

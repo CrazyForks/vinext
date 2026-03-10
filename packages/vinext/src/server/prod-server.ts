@@ -1030,27 +1030,6 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
         }
       }
 
-      // ── 7b. Pre-rendered HTML ─────────────────────────────────────
-      // Serve build-time rendered static pages. Placed after middleware,
-      // basePath stripping, redirects, and rewrites so those all run first.
-      const pagesPrerenderedFile = hasPrerenderedPages
-        ? resolvePrerenderedHtml(pagesPrerenderedDir, resolvedPathname)
-        : null;
-      if (pagesPrerenderedFile) {
-        const html = await fs.promises.readFile(pagesPrerenderedFile, "utf-8");
-        const prerenderedHeaders: Record<string, string | string[]> = { ...middlewareHeaders };
-        sendCompressed(
-          req,
-          res,
-          html,
-          "text/html; charset=utf-8",
-          200,
-          prerenderedHeaders,
-          compress,
-        );
-        return;
-      }
-
       // ── 8. API routes ─────────────────────────────────────────────
       if (resolvedPathname.startsWith("/api/") || resolvedPathname === "/api") {
         let response: Response;
@@ -1092,6 +1071,34 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
           resolvedUrl = rewritten;
           resolvedPathname = rewritten.split("?")[0];
         }
+      }
+
+      // ── 9b. Pre-rendered HTML (after all rewrites) ───────────────
+      // Serve build-time pre-rendered static pages. This sits after
+      // afterFiles rewrites (step 9) so that rewrites are applied first,
+      // matching Next.js execution order where pre-rendered pages are
+      // logically equivalent to page rendering. API routes (step 8) run
+      // first so an api.html pre-rendered file cannot shadow real API routes.
+      const pagesPrerenderedFile = hasPrerenderedPages
+        ? resolvePrerenderedHtml(pagesPrerenderedDir, resolvedPathname)
+        : null;
+      if (pagesPrerenderedFile) {
+        const html = await fs.promises.readFile(pagesPrerenderedFile, "utf-8");
+        const prerenderedHeaders: Record<string, string | string[]> = {
+          ...middlewareHeaders,
+          // Static pages are immutable between builds — allow long-lived CDN caching.
+          "Cache-Control": "s-maxage=31536000, stale-while-revalidate",
+        };
+        sendCompressed(
+          req,
+          res,
+          html,
+          "text/html; charset=utf-8",
+          middlewareRewriteStatus ?? 200,
+          prerenderedHeaders,
+          compress,
+        );
+        return;
       }
 
       // ── 10. SSR page rendering ────────────────────────────────────

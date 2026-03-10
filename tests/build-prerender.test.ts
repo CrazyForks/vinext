@@ -38,14 +38,23 @@ describe("Production server — serves pre-rendered HTML", () => {
       "utf-8",
     );
 
-    const { startProdServer } = await import("../packages/vinext/src/server/prod-server.js");
-    server = await startProdServer({
-      port: 0,
-      host: "127.0.0.1",
-      outDir,
-    });
-    const addr = server.address() as { port: number };
-    baseUrl = `http://127.0.0.1:${addr.port}`;
+    try {
+      const { startProdServer } = await import("../packages/vinext/src/server/prod-server.js");
+      server = await startProdServer({
+        port: 0,
+        host: "127.0.0.1",
+        outDir,
+      });
+      const addr = server.address() as { port: number };
+      baseUrl = `http://127.0.0.1:${addr.port}`;
+    } catch (e) {
+      // Clean up test files if server startup fails so subsequent runs aren't affected
+      if (fs.existsSync(prerenderedFile)) fs.rmSync(prerenderedFile);
+      if (fs.existsSync(pagesDir) && fs.readdirSync(pagesDir).length === 0) {
+        fs.rmdirSync(pagesDir);
+      }
+      throw e;
+    }
   });
 
   afterAll(async () => {
@@ -72,6 +81,13 @@ describe("Production server — serves pre-rendered HTML", () => {
     const res = await fetch(`${baseUrl}/prerendered-test`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
+  });
+
+  it("serves pre-rendered HTML with Cache-Control header for CDN caching", async () => {
+    const res = await fetch(`${baseUrl}/prerendered-test`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("s-maxage=31536000, stale-while-revalidate");
+    await res.text(); // consume body
   });
 
   it("falls back to SSR when no pre-rendered file exists", async () => {
