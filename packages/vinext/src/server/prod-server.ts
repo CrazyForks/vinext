@@ -1089,12 +1089,17 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
           // Static pages are immutable between builds — allow long-lived CDN caching.
           "Cache-Control": "s-maxage=31536000, stale-while-revalidate",
         };
+        // Always respond 200 for pre-rendered pages. middlewareRewriteStatus
+        // records the status from a NextResponse.rewrite() call — that value
+        // is intended for use when the page is rendered dynamically, not when
+        // we short-circuit with a pre-built file. A 403/302/etc. rewrite status
+        // paired with a 200 HTML body would be semantically wrong.
         sendCompressed(
           req,
           res,
           html,
           "text/html; charset=utf-8",
-          middlewareRewriteStatus ?? 200,
+          200,
           prerenderedHeaders,
           compress,
         );

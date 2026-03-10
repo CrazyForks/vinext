@@ -90,6 +90,16 @@ describe("Production server — serves pre-rendered HTML", () => {
     await res.text(); // consume body
   });
 
+  it("always serves pre-rendered HTML with status 200, ignoring middleware rewrite status", async () => {
+    // Pre-rendered files are served unconditionally as 200. A middleware
+    // NextResponse.rewrite() with a non-200 status is only meaningful when
+    // the page is rendered dynamically — forwarding that status alongside a
+    // cached HTML body would be semantically wrong.
+    const res = await fetch(`${baseUrl}/prerendered-test`);
+    expect(res.status).toBe(200);
+    await res.text();
+  });
+
   it("falls back to SSR when no pre-rendered file exists", async () => {
     // /about is a real page in pages-basic but has no pre-rendered file
     const res = await fetch(`${baseUrl}/about`);

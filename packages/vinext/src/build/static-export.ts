@@ -165,8 +165,8 @@ export async function staticExportPages(options: StaticExportOptions): Promise<S
       }
 
       const pathsResult = await pageModule.getStaticPaths({
-        locales: [],
-        defaultLocale: "",
+        locales: config.i18n?.locales ?? [],
+        defaultLocale: config.i18n?.defaultLocale ?? "",
       });
       const fallback = pathsResult?.fallback ?? false;
 
@@ -373,10 +373,13 @@ async function renderStaticPage(options: RenderStaticPageOptions): Promise<strin
     const ssrHeadHTML =
       typeof headShim.getSSRHeadHTML === "function" ? headShim.getSSRHeadHTML() : "";
 
-    // __NEXT_DATA__ for client hydration
+    // __NEXT_DATA__ for client hydration.
+    // `page` must use Next.js bracket notation ([slug]) so the client-side
+    // router can match this route during hydration. Colon notation (:slug)
+    // is vinext's internal format and is not understood by next/router.
     const nextDataScript = `<script>window.__NEXT_DATA__ = ${safeJsonStringify({
       props: { pageProps },
-      page: route.pattern,
+      page: patternToNextPage(route.pattern),
       query: params,
       buildId: _config.buildId,
     })}</script>`;
@@ -496,6 +499,40 @@ async function renderErrorPage(options: RenderErrorPageOptions): Promise<string 
 }
 
 /**
+ * Convert a colon-parameterised route pattern (vinext internal format) to
+ * Next.js bracket notation for use in __NEXT_DATA__.page.
+ *
+ * The Next.js client-side router uses the `page` field in __NEXT_DATA__ to
+ * match routes during hydration. It expects bracket notation (`[slug]`), not
+ * colon notation (`:slug`). Using the wrong format causes useRouter().query
+ * to return an empty object for dynamic pre-rendered pages.
+ *
+ * E.g.  "/blog/:slug"   → "/blog/[slug]"
+ *       "/docs/:slug+"  → "/docs/[...slug]"
+ *       "/docs/:slug*"  → "/docs/[[...slug]]"
+ */
+function patternToNextPage(pattern: string): string {
+  return pattern
+    .split("/")
+    .map((part) => {
+      if (part.endsWith("*") && part.startsWith(":")) {
+        // Optional catch-all: :slug* → [[...slug]]
+        return `[[...${part.slice(1, -1)}]]`;
+      }
+      if (part.endsWith("+") && part.startsWith(":")) {
+        // Required catch-all: :slug+ → [...slug]
+        return `[...${part.slice(1, -1)}]`;
+      }
+      if (part.startsWith(":")) {
+        // Regular dynamic segment: :id → [id]
+        return `[${part.slice(1)}]`;
+      }
+      return part;
+    })
+    .join("/");
+}
+
+/**
  * Build a URL path from a route pattern and params.
  * E.g., "/posts/:id" + { id: "42" } → "/posts/42"
  * E.g., "/docs/:slug+" + { slug: ["a", "b"] } → "/docs/a/b"
@@ -518,6 +555,11 @@ function buildUrlFromParams(pattern: string, params: Record<string, string | str
       // Dynamic segment: :id
       const paramName = part.slice(1);
       const value = params[paramName];
+      if (value === undefined || value === null) {
+        throw new Error(
+          `getStaticPaths/generateStaticParams returned an entry missing required param "${paramName}" for pattern "${pattern}"`,
+        );
+      }
       result.push(String(value));
     } else {
       result.push(part);
@@ -1076,14 +1118,21 @@ async function collectStaticRoutesFromSource(root: string): Promise<CollectedRou
   const urls: string[] = [];
   const skipped: string[] = [];
 
-  // Patterns that indicate a page has server-side data fetching.
-  // Intentionally broad (may match comments/strings) — false positives
-  // only cause a static page to be skipped, which is safe. False negatives
-  // (missing a GSSP page) would cause a broken pre-render.
-  // Note: export const revalidate is an App Router convention. Pages Router
-  // uses getStaticProps returning { revalidate }, so we don't check it here.
+  // Patterns that indicate a page should not be pre-rendered as fully static.
+  // Intentionally broad (may match comments/strings) — false positives only
+  // cause a static page to be skipped, which is safe. False negatives would
+  // cause a broken or over-cached pre-render.
+  //
+  // getServerSideProps: page is server-rendered on every request — skip.
   const gsspPattern =
     /export\s+(async\s+)?function\s+getServerSideProps|export\s+(const|let|var)\s+getServerSideProps/;
+  // Re-exported getServerSideProps: `export { getServerSideProps } from ...`
+  const gsspReExportPattern = /export\s*\{[^}]*\bgetServerSideProps\b[^}]*\}/;
+  // ISR: getStaticProps returning { revalidate } means the page needs
+  // periodic regeneration. Pre-rendering it with s-maxage=31536000 would
+  // pin the CDN cache for a year regardless of the revalidate interval.
+  // Detect any `revalidate:` or `revalidate :` key in the source and skip.
+  const isrPattern = /\brevalidate\s*:/;
 
   for (const route of routes) {
     const routeName = path.basename(route.filePath, path.extname(route.filePath));
@@ -1097,8 +1146,13 @@ async function collectStaticRoutesFromSource(root: string): Promise<CollectedRou
     try {
       const source = fs.readFileSync(route.filePath, "utf-8");
 
-      if (gsspPattern.test(source)) {
+      if (gsspPattern.test(source) || gsspReExportPattern.test(source)) {
         skipped.push(`${route.pattern} (getServerSideProps)`);
+        continue;
+      }
+
+      if (isrPattern.test(source)) {
+        skipped.push(`${route.pattern} (ISR — getStaticProps with revalidate)`);
         continue;
       }
 
