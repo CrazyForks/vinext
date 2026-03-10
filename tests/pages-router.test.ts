@@ -1875,12 +1875,8 @@ describe("Static export (Pages Router)", () => {
   });
 
   it("warns and skips dynamic routes without getStaticPaths", async () => {
-    const { staticExportPages } = await import(
-      "../packages/vinext/src/build/static-export.js"
-    );
-    const { resolveNextConfig } = await import(
-      "../packages/vinext/src/config/next-config.js"
-    );
+    const { staticExportPages } = await import("../packages/vinext/src/build/static-export.js");
+    const { resolveNextConfig } = await import("../packages/vinext/src/config/next-config.js");
 
     // Create a fake dynamic route with no getStaticPaths
     const fakeRoutes = [
@@ -1906,9 +1902,7 @@ describe("Static export (Pages Router)", () => {
 
       // Should warn (not error) about missing getStaticPaths
       expect(result.errors).toHaveLength(0);
-      expect(
-        result.warnings.some((w) => w.includes("getStaticPaths")),
-      ).toBe(true);
+      expect(result.warnings.some((w) => w.includes("getStaticPaths"))).toBe(true);
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }

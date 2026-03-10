@@ -314,9 +314,7 @@ async function buildApp() {
   if (resolvedConfig.output === "export") {
     console.log("\n  Static export (output: 'export')...\n");
 
-    const { runStaticExport } = await import(
-      /* @vite-ignore */ "./build/static-export.js"
-    );
+    const { runStaticExport } = await import(/* @vite-ignore */ "./build/static-export.js");
 
     const result = await runStaticExport({ root: process.cwd(), config: resolvedConfig });
 
@@ -341,9 +339,7 @@ async function buildApp() {
   // ── Pre-render static pages (non-export builds) ────────────────
   console.log("  Pre-rendering static pages...\n");
 
-  const { prerenderStaticPages } = await import(
-    /* @vite-ignore */ "./build/static-export.js"
-  );
+  const { prerenderStaticPages } = await import(/* @vite-ignore */ "./build/static-export.js");
 
   const prerenderResult = await prerenderStaticPages({ root: process.cwd() });
 
@@ -377,9 +373,7 @@ async function start() {
   const rawConfig = await loadNextConfig(process.cwd());
   const resolvedConfig = await resolveNextConfig(rawConfig);
   if (resolvedConfig.output === "export") {
-    console.error(
-      '\n  "vinext start" does not work with "output: export" configuration.',
-    );
+    console.error('\n  "vinext start" does not work with "output: export" configuration.');
     console.error("  Use a static file server instead:\n");
     console.error("    npx serve out\n");
     process.exit(1);

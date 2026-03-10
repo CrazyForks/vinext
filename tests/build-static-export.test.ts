@@ -66,9 +66,7 @@ describe("runStaticExport — Pages Router", () => {
   it("reports errors for getServerSideProps pages, not crashes", () => {
     // pages-basic has pages that use getServerSideProps (e.g. ssr.tsx).
     // These should appear as structured errors, not thrown exceptions.
-    const gsspErrors = result.errors.filter((e) =>
-      e.error.includes("getServerSideProps"),
-    );
+    const gsspErrors = result.errors.filter((e) => e.error.includes("getServerSideProps"));
     expect(gsspErrors.length).toBeGreaterThan(0);
   });
 
@@ -145,9 +143,7 @@ describe("runStaticExport — App Router", () => {
 
   it("returns no errors for the core static pages", () => {
     // index and about are plain server components — no dynamic API, no errors expected.
-    const coreRouteErrors = result.errors.filter(
-      (e) => e.route === "/" || e.route === "/about",
-    );
+    const coreRouteErrors = result.errors.filter((e) => e.route === "/" || e.route === "/about");
     expect(coreRouteErrors).toEqual([]);
   });
 });

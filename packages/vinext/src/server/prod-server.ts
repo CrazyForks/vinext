@@ -314,12 +314,20 @@ function resolvePrerenderedHtml(dir: string, pathname: string): string | null {
   const resolvedDir = path.resolve(dir);
 
   const directPath = path.join(dir, `${normalized}.html`);
-  if (path.resolve(directPath).startsWith(resolvedDir + path.sep) && fs.existsSync(directPath) && fs.statSync(directPath).isFile()) {
+  if (
+    path.resolve(directPath).startsWith(resolvedDir + path.sep) &&
+    fs.existsSync(directPath) &&
+    fs.statSync(directPath).isFile()
+  ) {
     return directPath;
   }
 
   const indexPath = path.join(dir, normalized, "index.html");
-  if (path.resolve(indexPath).startsWith(resolvedDir + path.sep) && fs.existsSync(indexPath) && fs.statSync(indexPath).isFile()) {
+  if (
+    path.resolve(indexPath).startsWith(resolvedDir + path.sep) &&
+    fs.existsSync(indexPath) &&
+    fs.statSync(indexPath).isFile()
+  ) {
     return indexPath;
   }
 
@@ -1027,7 +1035,15 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
       if (pagesPrerenderedFile) {
         const html = await fs.promises.readFile(pagesPrerenderedFile, "utf-8");
         const prerenderedHeaders: Record<string, string | string[]> = { ...middlewareHeaders };
-        sendCompressed(req, res, html, "text/html; charset=utf-8", 200, prerenderedHeaders, compress);
+        sendCompressed(
+          req,
+          res,
+          html,
+          "text/html; charset=utf-8",
+          200,
+          prerenderedHeaders,
+          compress,
+        );
         return;
       }
 

@@ -26,7 +26,7 @@ describe("Production server — serves pre-rendered HTML", () => {
     if (!fs.existsSync(serverEntryPath)) {
       throw new Error(
         `Fixture not built: ${serverEntryPath} does not exist. ` +
-        `Run "cd ${PAGES_FIXTURE} && pnpm build" first.`,
+          `Run "cd ${PAGES_FIXTURE} && pnpm build" first.`,
       );
     }
 
@@ -38,9 +38,7 @@ describe("Production server — serves pre-rendered HTML", () => {
       "utf-8",
     );
 
-    const { startProdServer } = await import(
-      "../packages/vinext/src/server/prod-server.js"
-    );
+    const { startProdServer } = await import("../packages/vinext/src/server/prod-server.js");
     server = await startProdServer({
       port: 0,
       host: "127.0.0.1",
@@ -63,83 +61,68 @@ describe("Production server — serves pre-rendered HTML", () => {
     }
   });
 
-  it(
-    "serves pre-rendered HTML for /prerendered-test",
-    async () => {
-      const res = await fetch(`${baseUrl}/prerendered-test`);
+  it("serves pre-rendered HTML for /prerendered-test", async () => {
+    const res = await fetch(`${baseUrl}/prerendered-test`);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("Pre-rendered test content");
+  });
+
+  it("serves pre-rendered HTML with text/html content type", async () => {
+    const res = await fetch(`${baseUrl}/prerendered-test`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+  });
+
+  it("falls back to SSR when no pre-rendered file exists", async () => {
+    // /about is a real page in pages-basic but has no pre-rendered file
+    const res = await fetch(`${baseUrl}/about`);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("About");
+  });
+
+  it("serves nested pre-rendered HTML (e.g. /blog/hello-world)", async () => {
+    // Create a nested pre-rendered file simulating a dynamic route
+    const nestedDir = path.join(pagesDir, "blog");
+    const nestedFile = path.join(nestedDir, "hello-world.html");
+    fs.mkdirSync(nestedDir, { recursive: true });
+    fs.writeFileSync(
+      nestedFile,
+      `<!DOCTYPE html><html><body>Blog post content</body></html>`,
+      "utf-8",
+    );
+
+    try {
+      const res = await fetch(`${baseUrl}/blog/hello-world`);
       expect(res.status).toBe(200);
       const html = await res.text();
-      expect(html).toContain("Pre-rendered test content");
-    },
-  );
+      expect(html).toContain("Blog post content");
+    } finally {
+      fs.rmSync(nestedFile);
+      if (fs.existsSync(nestedDir) && fs.readdirSync(nestedDir).length === 0) {
+        fs.rmdirSync(nestedDir);
+      }
+    }
+  });
 
-  it(
-    "serves pre-rendered HTML with text/html content type",
-    async () => {
-      const res = await fetch(`${baseUrl}/prerendered-test`);
-      expect(res.status).toBe(200);
-      expect(res.headers.get("content-type")).toContain("text/html");
-    },
-  );
+  it("serves pre-rendered index.html for /", async () => {
+    const indexFile = path.join(pagesDir, "index.html");
+    fs.writeFileSync(
+      indexFile,
+      `<!DOCTYPE html><html><body>Pre-rendered home</body></html>`,
+      "utf-8",
+    );
 
-  it(
-    "falls back to SSR when no pre-rendered file exists",
-    async () => {
-      // /about is a real page in pages-basic but has no pre-rendered file
-      const res = await fetch(`${baseUrl}/about`);
+    try {
+      const res = await fetch(`${baseUrl}/`);
       expect(res.status).toBe(200);
       const html = await res.text();
-      expect(html).toContain("About");
-    },
-  );
-
-  it(
-    "serves nested pre-rendered HTML (e.g. /blog/hello-world)",
-    async () => {
-      // Create a nested pre-rendered file simulating a dynamic route
-      const nestedDir = path.join(pagesDir, "blog");
-      const nestedFile = path.join(nestedDir, "hello-world.html");
-      fs.mkdirSync(nestedDir, { recursive: true });
-      fs.writeFileSync(
-        nestedFile,
-        `<!DOCTYPE html><html><body>Blog post content</body></html>`,
-        "utf-8",
-      );
-
-      try {
-        const res = await fetch(`${baseUrl}/blog/hello-world`);
-        expect(res.status).toBe(200);
-        const html = await res.text();
-        expect(html).toContain("Blog post content");
-      } finally {
-        fs.rmSync(nestedFile);
-        if (fs.existsSync(nestedDir) && fs.readdirSync(nestedDir).length === 0) {
-          fs.rmdirSync(nestedDir);
-        }
-      }
-    },
-  );
-
-  it(
-    "serves pre-rendered index.html for /",
-    async () => {
-      const indexFile = path.join(pagesDir, "index.html");
-      fs.writeFileSync(
-        indexFile,
-        `<!DOCTYPE html><html><body>Pre-rendered home</body></html>`,
-        "utf-8",
-      );
-
-      try {
-        const res = await fetch(`${baseUrl}/`);
-        expect(res.status).toBe(200);
-        const html = await res.text();
-        expect(html).toContain("Pre-rendered home");
-      } finally {
-        fs.rmSync(indexFile);
-      }
-    },
-  );
+      expect(html).toContain("Pre-rendered home");
+    } finally {
+      fs.rmSync(indexFile);
+    }
+  });
 });
 
 // ─── prerenderStaticPages — function exists ───────────────────────────────────
@@ -151,9 +134,7 @@ describe("prerenderStaticPages — function exists", () => {
   });
 
   it("PrerenderResult type is returned", async () => {
-    const { prerenderStaticPages } = await import(
-      "../packages/vinext/src/build/static-export.js"
-    );
+    const { prerenderStaticPages } = await import("../packages/vinext/src/build/static-export.js");
     // Call with the pages-basic fixture which has a built dist/
     const result = await prerenderStaticPages({ root: PAGES_FIXTURE });
     expect(result).toHaveProperty("pageCount");

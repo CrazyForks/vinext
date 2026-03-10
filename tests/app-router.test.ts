@@ -1724,9 +1724,7 @@ describe("App Router Static export", () => {
 
       // Should warn (not error) about missing generateStaticParams
       expect(result.errors).toHaveLength(0);
-      expect(
-        result.warnings.some((w) => w.includes("generateStaticParams")),
-      ).toBe(true);
+      expect(result.warnings.some((w) => w.includes("generateStaticParams"))).toBe(true);
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }

@@ -21,7 +21,12 @@
 import type { ViteDevServer } from "vite";
 import type { Route } from "../routing/pages-router.js";
 import type { AppRoute } from "../routing/app-router.js";
-import { loadNextConfig, resolveNextConfig, type ResolvedNextConfig, type NextConfig } from "../config/next-config.js";
+import {
+  loadNextConfig,
+  resolveNextConfig,
+  type ResolvedNextConfig,
+  type NextConfig,
+} from "../config/next-config.js";
 import { pagesRouter, apiRouter } from "../routing/pages-router.js";
 import { appRouter } from "../routing/app-router.js";
 import { safeJsonStringify } from "../server/html.js";
@@ -366,9 +371,7 @@ async function renderStaticPage(options: RenderStaticPageOptions): Promise<strin
 
     // Collect head tags
     const ssrHeadHTML =
-      typeof headShim.getSSRHeadHTML === "function"
-        ? headShim.getSSRHeadHTML()
-        : "";
+      typeof headShim.getSSRHeadHTML === "function" ? headShim.getSSRHeadHTML() : "";
 
     // __NEXT_DATA__ for client hydration
     const nextDataScript = `<script>window.__NEXT_DATA__ = ${safeJsonStringify({
@@ -651,7 +654,9 @@ async function expandDynamicAppRoute(
   route: AppRoute,
   allRoutes: AppRoute[],
   server: ViteDevServer,
-  generateStaticParams: (opts: { params: Record<string, string | string[]> }) => Promise<Record<string, string | string[]>[]>,
+  generateStaticParams: (opts: {
+    params: Record<string, string | string[]>;
+  }) => Promise<Record<string, string | string[]>[]>,
 ): Promise<string[]> {
   const parentParamSets = await resolveParentParams(route, allRoutes, server);
 
@@ -743,7 +748,10 @@ export async function staticExportApp(
         }
 
         const expandedUrls = await expandDynamicAppRoute(
-          route, routes, server, pageModule.generateStaticParams,
+          route,
+          routes,
+          server,
+          pageModule.generateStaticParams,
         );
 
         if (expandedUrls.length === 0) {
@@ -849,14 +857,8 @@ export async function runStaticExport(
   }
 
   // 2. Detect router type
-  const appDirCandidates = [
-    path.join(root, "app"),
-    path.join(root, "src", "app"),
-  ];
-  const pagesDirCandidates = [
-    path.join(root, "pages"),
-    path.join(root, "src", "pages"),
-  ];
+  const appDirCandidates = [path.join(root, "app"), path.join(root, "src", "app")];
+  const pagesDirCandidates = [path.join(root, "pages"), path.join(root, "src", "pages")];
 
   const appDir = appDirCandidates.find((d) => fs.existsSync(d));
   const pagesDir = pagesDirCandidates.find((d) => fs.existsSync(d));
@@ -941,9 +943,7 @@ export interface PrerenderResult {
  * because the App Router prod server delegates entirely to the RSC handler
  * (which manages its own middleware, auth, and streaming pipeline).
  */
-export async function prerenderStaticPages(
-  options: PrerenderOptions,
-): Promise<PrerenderResult> {
+export async function prerenderStaticPages(options: PrerenderOptions): Promise<PrerenderResult> {
   const { root } = options;
   const distDir = options.distDir ?? path.join(root, "dist");
 
@@ -1050,10 +1050,7 @@ export async function prerenderStaticPages(
  * Dynamic routes are skipped (they need getStaticPaths execution).
  */
 async function collectStaticRoutesFromSource(root: string): Promise<CollectedRoutes> {
-  const pagesDirCandidates = [
-    path.join(root, "pages"),
-    path.join(root, "src", "pages"),
-  ];
+  const pagesDirCandidates = [path.join(root, "pages"), path.join(root, "src", "pages")];
   const pagesDir = pagesDirCandidates.find((d) => fs.existsSync(d));
   if (!pagesDir) return { urls: [], skipped: [] };
 
@@ -1062,7 +1059,8 @@ async function collectStaticRoutesFromSource(root: string): Promise<CollectedRou
   const skipped: string[] = [];
 
   // Patterns that indicate a page has server-side data fetching
-  const gsspPattern = /export\s+(async\s+)?function\s+getServerSideProps|export\s+(const|let|var)\s+getServerSideProps/;
+  const gsspPattern =
+    /export\s+(async\s+)?function\s+getServerSideProps|export\s+(const|let|var)\s+getServerSideProps/;
   const revalidateZeroPattern = /export\s+const\s+revalidate\s*=\s*0\b/;
 
   for (const route of routes) {
@@ -1100,4 +1098,3 @@ interface CollectedRoutes {
   urls: string[];
   skipped: string[];
 }
-
