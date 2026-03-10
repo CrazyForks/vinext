@@ -103,22 +103,30 @@ function fileToRoute(file: string, pagesDir: string, matcher: ValidFileMatcher):
   const params: string[] = [];
   let isDynamic = false;
 
-  // Convert Next.js dynamic segments to URL patterns
-  const urlSegments = segments.map((segment) => {
+  // Convert Next.js dynamic segments to URL patterns.
+  // Catch-all segments are only valid in terminal position.
+  const urlSegments: string[] = [];
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+
     // Catch-all: [...slug] -> :slug+ (param names may contain hyphens)
     const catchAllMatch = segment.match(/^\[\.\.\.([\w-]+)\]$/);
     if (catchAllMatch) {
+      if (i !== segments.length - 1) return null;
       isDynamic = true;
       params.push(catchAllMatch[1]);
-      return `:${catchAllMatch[1]}+`;
+      urlSegments.push(`:${catchAllMatch[1]}+`);
+      continue;
     }
 
     // Optional catch-all: [[...slug]] -> :slug* (param names may contain hyphens)
     const optionalCatchAllMatch = segment.match(/^\[\[\.\.\.([\w-]+)\]\]$/);
     if (optionalCatchAllMatch) {
+      if (i !== segments.length - 1) return null;
       isDynamic = true;
       params.push(optionalCatchAllMatch[1]);
-      return `:${optionalCatchAllMatch[1]}*`;
+      urlSegments.push(`:${optionalCatchAllMatch[1]}*`);
+      continue;
     }
 
     // Dynamic segment: [id] -> :id (param names may contain hyphens)
@@ -126,11 +134,12 @@ function fileToRoute(file: string, pagesDir: string, matcher: ValidFileMatcher):
     if (dynamicMatch) {
       isDynamic = true;
       params.push(dynamicMatch[1]);
-      return `:${dynamicMatch[1]}`;
+      urlSegments.push(`:${dynamicMatch[1]}`);
+      continue;
     }
 
-    return segment;
-  });
+    urlSegments.push(segment);
+  }
 
   const pattern = "/" + urlSegments.join("/");
 
@@ -237,6 +246,7 @@ function matchPattern(
 
     // Catch-all: :slug+
     if (pp.endsWith("+")) {
+      if (i !== patternParts.length - 1) return null;
       const paramName = pp.slice(1, -1);
       const remaining = urlParts.slice(i);
       if (remaining.length === 0) return null;
@@ -246,6 +256,7 @@ function matchPattern(
 
     // Optional catch-all: :slug*
     if (pp.endsWith("*")) {
+      if (i !== patternParts.length - 1) return null;
       const paramName = pp.slice(1, -1);
       const remaining = urlParts.slice(i);
       params[paramName] = remaining;
