@@ -339,7 +339,10 @@ async function buildApp() {
   // ── Pre-render static pages (non-export builds) ────────────────
   const { prerenderStaticPages } = await import(/* @vite-ignore */ "./build/static-export.js");
 
-  const prerenderResult = await prerenderStaticPages({ root: process.cwd() });
+  const prerenderResult = await prerenderStaticPages({
+    root: process.cwd(),
+    config: resolvedConfig,
+  });
 
   if (prerenderResult.warnings.length > 0) {
     for (const w of prerenderResult.warnings) console.log(`  Warning: ${w}`);

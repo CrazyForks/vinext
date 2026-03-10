@@ -175,19 +175,26 @@ describe("prerenderStaticPages — function exists", () => {
 // ─── getOutputPath — path-traversal guard ────────────────────────────────────
 
 describe("getOutputPath — path-traversal guard", () => {
-  it("rejects paths that escape the output directory", async () => {
+  // URL inputs always start with '/', so path.posix.normalize can never
+  // produce a path above '/' (e.g. "/../etc/passwd" normalizes to "/etc/passwd").
+  // The boundary check therefore prevents traversal for non-URL-derived paths
+  // such as those coming directly from generateStaticParams/getStaticPaths on
+  // Windows (where path.sep is '\' and path.resolve uses drive roots).
+  // We verify the safe paths and the fact that suspicious-looking inputs are
+  // normalized to safe outputs rather than throwing.
+
+  it("normalizes traversal segments — /../etc/passwd maps to /etc/passwd within outDir", async () => {
     const { getOutputPath } = await import("../packages/vinext/src/build/static-export.js");
-    expect(() => getOutputPath("/../etc/passwd", false, "/tmp/out")).toThrow(
-      /escapes the output directory/,
-    );
+    // path.posix.normalize("/../etc/passwd") === "/etc/passwd", so this
+    // resolves to /tmp/out/etc/passwd.html — within bounds.
+    expect(getOutputPath("/../etc/passwd", false, "/tmp/out")).toBe("etc/passwd.html");
   });
 
-  it("rejects double-encoded traversal attempts", async () => {
+  it("normalizes multi-level traversal — /../../secret maps to /secret within outDir", async () => {
     const { getOutputPath } = await import("../packages/vinext/src/build/static-export.js");
-    // path.posix.normalize resolves '..' segments before the boundary check
-    expect(() => getOutputPath("/../../secret", false, "/tmp/out")).toThrow(
-      /escapes the output directory/,
-    );
+    // path.posix.normalize("/../../secret") === "/secret", so this
+    // resolves to /tmp/out/secret.html — within bounds.
+    expect(getOutputPath("/../../secret", false, "/tmp/out")).toBe("secret.html");
   });
 
   it("accepts normal paths within the output directory", async () => {

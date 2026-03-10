@@ -58,6 +58,11 @@ async function createTempViteServer(
   const server = await vite.createServer({
     root,
     configFile: false,
+    // appDir: root passes the project root as the base directory. The
+    // vinext plugin treats appDir as an override for baseDir (it auto-appends
+    // "app/" when resolving routes), so passing root is equivalent to omitting
+    // the option. It is kept explicit here so future readers know it was a
+    // deliberate choice, not an accidental misconfiguration.
     plugins: [vinextPlugin({ appDir: root })],
     optimizeDeps: { holdUntilCrawlEnd: true },
     server: { port: 0, cors: false },
@@ -659,7 +664,14 @@ async function resolveParentParams(
             generateStaticParams: parentModule.generateStaticParams,
           });
         }
-      } catch {
+      } catch (e) {
+        // Warn instead of silently swallowing: a failed parent load means we
+        // call the child's generateStaticParams with an empty params object,
+        // which produces wrong URLs and is very hard to debug otherwise.
+        console.warn(
+          `[vinext] Warning: failed to load parent module for ${childRoute.pattern} at ${parentRoute.pagePath}. ` +
+            `Child generateStaticParams will be called with {} instead of parent params. Error: ${(e as Error).message}`,
+        );
         // Skip — parent module couldn't be loaded
       }
     }
@@ -805,7 +817,7 @@ export async function staticExportApp(
       } catch (e) {
         result.errors.push({
           route: route.pattern,
-          error: `Failed to call generateStaticParams(): ${(e as Error).message}`,
+          error: (e as Error).message,
         });
       }
     } else {
@@ -984,6 +996,8 @@ export async function runStaticExport(
 export interface PrerenderOptions {
   root: string;
   distDir?: string;
+  /** Pre-resolved next.config.js. If omitted, loaded from root. */
+  config?: ResolvedNextConfig;
 }
 
 export interface PrerenderResult {
@@ -1007,6 +1021,16 @@ export interface PrerenderResult {
 export async function prerenderStaticPages(options: PrerenderOptions): Promise<PrerenderResult> {
   const { root } = options;
   const distDir = options.distDir ?? path.join(root, "dist");
+
+  // Load config to get trailingSlash (and other settings). Reuse caller's
+  // resolved config when provided to avoid a redundant disk read.
+  let config: ResolvedNextConfig;
+  if (options.config) {
+    config = options.config;
+  } else {
+    const { loadNextConfig, resolveNextConfig } = await import("../config/next-config.js");
+    config = await resolveNextConfig(await loadNextConfig(root));
+  }
 
   const result: PrerenderResult = {
     pageCount: 0,
@@ -1087,7 +1111,14 @@ export async function prerenderStaticPages(options: PrerenderOptions): Promise<P
         }
 
         const html = await res.text();
-        const outputPath = getOutputPath(urlPath, false, pagesOutDir);
+        const contentType = res.headers.get("content-type") ?? "";
+        if (!contentType.includes("text/html")) {
+          // Non-HTML response (e.g. a JSON API route misclassified as static).
+          // Writing it as .html would produce a corrupt file — skip instead.
+          result.skipped.push(`${urlPath} (non-HTML content-type: ${contentType})`);
+          continue;
+        }
+        const outputPath = getOutputPath(urlPath, config.trailingSlash, pagesOutDir);
         const fullPath = path.join(pagesOutDir, outputPath);
         fs.mkdirSync(path.dirname(fullPath), { recursive: true });
         fs.writeFileSync(fullPath, html, "utf-8");
@@ -1113,6 +1144,13 @@ export async function prerenderStaticPages(options: PrerenderOptions): Promise<P
  * Scans the pages/ directory and reads each source file to detect exports
  * like getServerSideProps and revalidate, without starting a Vite dev server.
  * Dynamic routes are skipped (they need getStaticPaths execution).
+ *
+ * **Source tree required at pre-render time.** This function reads the original
+ * TypeScript/JSX source files (e.g. `pages/about.tsx`) to detect server-side
+ * exports. If the source tree is absent at deploy time — such as in a Docker
+ * multi-stage build where only `dist/` is copied — pre-rendering will silently
+ * produce zero routes and return early. Ensure the pages/ source directory is
+ * present in any environment where pre-rendering should run.
  */
 async function collectStaticRoutesFromSource(root: string): Promise<CollectedRoutes> {
   const pagesDirCandidates = [path.join(root, "pages"), path.join(root, "src", "pages")];
