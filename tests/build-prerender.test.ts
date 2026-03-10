@@ -14,22 +14,17 @@ const PAGES_FIXTURE = path.resolve(import.meta.dirname, "./fixtures/pages-basic"
 
 // ─── Production server — serves pre-rendered HTML ─────────────────────────────
 
-describe("Production server — serves pre-rendered HTML", () => {
-  const outDir = path.resolve(PAGES_FIXTURE, "dist");
-  const serverEntryPath = path.join(outDir, "server", "entry.js");
+const outDir = path.resolve(PAGES_FIXTURE, "dist");
+const serverEntryPath = path.join(outDir, "server", "entry.js");
+const fixtureBuilt = fs.existsSync(serverEntryPath);
+
+describe.skipIf(!fixtureBuilt)("Production server — serves pre-rendered HTML", () => {
   const pagesDir = path.join(outDir, "server", "pages");
   const prerenderedFile = path.join(pagesDir, "prerendered-test.html");
   let server: Server;
   let baseUrl: string;
 
   beforeAll(async () => {
-    if (!fs.existsSync(serverEntryPath)) {
-      throw new Error(
-        `Fixture not built: ${serverEntryPath} does not exist. ` +
-          `Run "cd ${PAGES_FIXTURE} && pnpm build" first.`,
-      );
-    }
-
     // Create a fake pre-rendered HTML file at dist/server/pages/prerendered-test.html
     fs.mkdirSync(pagesDir, { recursive: true });
     fs.writeFileSync(
@@ -101,7 +96,14 @@ describe("Production server — serves pre-rendered HTML", () => {
   });
 
   it("falls back to SSR when no pre-rendered file exists", async () => {
-    // /about is a real page in pages-basic but has no pre-rendered file
+    // /about is a real page in pages-basic but has no pre-rendered file.
+    // Assert the file is absent so this test is not vacuous.
+    const aboutFile = path.join(pagesDir, "about.html");
+    expect(
+      fs.existsSync(aboutFile),
+      "about.html must not exist in pagesDir for this test to be meaningful",
+    ).toBe(false);
+
     const res = await fetch(`${baseUrl}/about`);
     expect(res.status).toBe(200);
     const html = await res.text();
@@ -167,5 +169,31 @@ describe("prerenderStaticPages — function exists", () => {
     expect(result).toHaveProperty("files");
     expect(result).toHaveProperty("warnings");
     expect(result).toHaveProperty("skipped");
+  });
+});
+
+// ─── getOutputPath — path-traversal guard ────────────────────────────────────
+
+describe("getOutputPath — path-traversal guard", () => {
+  it("rejects paths that escape the output directory", async () => {
+    const { getOutputPath } = await import("../packages/vinext/src/build/static-export.js");
+    expect(() => getOutputPath("/../etc/passwd", false, "/tmp/out")).toThrow(
+      /escapes the output directory/,
+    );
+  });
+
+  it("rejects double-encoded traversal attempts", async () => {
+    const { getOutputPath } = await import("../packages/vinext/src/build/static-export.js");
+    // path.posix.normalize resolves '..' segments before the boundary check
+    expect(() => getOutputPath("/../../secret", false, "/tmp/out")).toThrow(
+      /escapes the output directory/,
+    );
+  });
+
+  it("accepts normal paths within the output directory", async () => {
+    const { getOutputPath } = await import("../packages/vinext/src/build/static-export.js");
+    expect(getOutputPath("/about", false, "/tmp/out")).toBe("about.html");
+    expect(getOutputPath("/blog/hello-world", false, "/tmp/out")).toBe("blog/hello-world.html");
+    expect(getOutputPath("/", false, "/tmp/out")).toBe("index.html");
   });
 });

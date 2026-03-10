@@ -578,7 +578,7 @@ function buildUrlFromParams(pattern: string, params: Record<string, string | str
  * against `outDir` and checks that it doesn't escape the boundary
  * (e.g. via crafted `generateStaticParams` / `getStaticPaths` values).
  */
-function getOutputPath(urlPath: string, trailingSlash: boolean, outDir: string): string {
+export function getOutputPath(urlPath: string, trailingSlash: boolean, outDir: string): string {
   if (urlPath === "/") {
     return "index.html";
   }

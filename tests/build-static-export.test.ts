@@ -23,7 +23,8 @@ describe("runStaticExport — Pages Router", () => {
     result = await runStaticExport({
       root: PAGES_FIXTURE,
       outDir,
-      configOverride: { output: "export" },
+      // trailingSlash: false → pages are written as about.html, not about/index.html
+      configOverride: { output: "export", trailingSlash: false },
     });
   }, 60_000);
 
@@ -85,7 +86,8 @@ describe("runStaticExport — App Router", () => {
     result = await runStaticExport({
       root: APP_FIXTURE,
       outDir,
-      configOverride: { output: "export" },
+      // trailingSlash: false → pages are written as about.html, not about/index.html
+      configOverride: { output: "export", trailingSlash: false },
     });
   }, 60_000);
 
@@ -126,17 +128,19 @@ describe("runStaticExport — App Router", () => {
   });
 
   it("produces a warning (not error) for empty generateStaticParams", () => {
-    // If a dynamic route's generateStaticParams returns [], it should be a
-    // warning — the route is simply skipped — not a hard error.
-    // This is tested structurally: warnings are strings, errors have { route, error }.
-    // The existing staticExportApp already handles this as a warning.
+    // app-basic/app/empty-gsp/[slug]/page.tsx has generateStaticParams returning [].
+    // This should produce a warning and skip the route, not throw an error.
+    const emptyGspWarning = result.warnings.find((w) => w.includes("empty-gsp"));
+    expect(emptyGspWarning, "expected a warning for the empty-gsp route").toBeDefined();
+
+    // All warnings must be strings
     for (const w of result.warnings) {
       expect(typeof w).toBe("string");
     }
+    // No error should mention "empty" generateStaticParams — that goes in warnings
     for (const e of result.errors) {
       expect(e).toHaveProperty("route");
       expect(e).toHaveProperty("error");
-      // No error should mention "empty" generateStaticParams — that goes in warnings
       expect(e.error).not.toMatch(/returned empty array/);
     }
   });
