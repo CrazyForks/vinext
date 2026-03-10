@@ -19,7 +19,7 @@ import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
-import { detectPackageManager } from "./utils/project.js";
+import { detectPackageManager, ensureViteConfigCompatibility } from "./utils/project.js";
 import { deploy as runDeploy, parseDeployArgs } from "./deploy.js";
 import { runCheck, formatReport } from "./check.js";
 import { init as runInit, getReactUpgradeDeps } from "./init.js";
@@ -78,9 +78,8 @@ function getViteVersion(): string {
   return _viteModule?.version ?? "unknown";
 }
 
-const VERSION = JSON.parse(
-  fs.readFileSync(new URL("../package.json", import.meta.url), "utf-8"),
-).version as string;
+const VERSION = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf-8"))
+  .version as string;
 
 // ─── CLI Argument Parsing ──────────────────────────────────────────────────────
 
@@ -165,17 +164,38 @@ function buildViteConfig(overrides: Record<string, unknown> = {}) {
     // when vinext is symlinked (bun link / npm link) and both vinext's
     // and the project's node_modules contain React.
     resolve: {
-      dedupe: [
-        "react",
-        "react-dom",
-        "react/jsx-runtime",
-        "react/jsx-dev-runtime",
-      ],
+      dedupe: ["react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime"],
     },
     ...overrides,
   };
 
   return config;
+}
+
+/**
+ * Ensure the project's package.json has `"type": "module"` before Vite loads
+ * the vite.config.ts. This prevents the esbuild CJS-bundling path that Vite
+ * takes for projects without `"type": "module"`, which produces a `.mjs` temp
+ * file containing `require()` calls — calls that fail on Node 22 when
+ * targeting pure-ESM packages like `@cloudflare/vite-plugin`.
+ *
+ * This mirrors what `vinext init` does, but is applied lazily at dev/build
+ * time for projects that were set up before `vinext init` added the step, or
+ * that were migrated manually.
+ */
+function applyViteConfigCompatibility(root: string): void {
+  const result = ensureViteConfigCompatibility(root);
+  if (!result) return;
+
+  for (const [oldName, newName] of result.renamed) {
+    console.warn(`  [vinext] Renamed ${oldName} → ${newName} (required for "type": "module")`);
+  }
+  if (result.addedTypeModule) {
+    console.warn(
+      `  [vinext] Added "type": "module" to package.json (required for Vite ESM config loading).\n` +
+        `  Run \`vinext init\` to review all project configuration.`,
+    );
+  }
 }
 
 // ─── Commands ─────────────────────────────────────────────────────────────────
@@ -188,6 +208,11 @@ async function dev() {
     root: process.cwd(),
     mode: "development",
   });
+
+  // Ensure "type": "module" in package.json before Vite loads vite.config.ts.
+  // Without this, Vite bundles the config as CJS and tries require() on pure-ESM
+  // packages like @cloudflare/vite-plugin, which fails on Node 22.
+  applyViteConfigCompatibility(process.cwd());
 
   const vite = await loadVite();
 
@@ -213,6 +238,11 @@ async function buildApp() {
     root: process.cwd(),
     mode: "production",
   });
+
+  // Ensure "type": "module" in package.json before Vite loads vite.config.ts.
+  // Without this, Vite bundles the config as CJS and tries require() on pure-ESM
+  // packages like @cloudflare/vite-plugin, which fails on Node 22.
+  applyViteConfigCompatibility(process.cwd());
 
   const vite = await loadVite();
 
@@ -243,31 +273,35 @@ async function buildApp() {
     // Use buildViteConfig() so that when a vite.config exists we don't
     // duplicate the vinext() plugin.
     console.log("  Building client...");
-    await vite.build(buildViteConfig({
-      build: {
-        outDir: "dist/client",
-        manifest: true,
-        ssrManifest: true,
-        rollupOptions: {
-          input: "virtual:vinext-client-entry",
-          output: clientOutputConfig,
-          treeshake: clientTreeshakeConfig,
-        },
-      },
-    }));
-
-    console.log("  Building server...");
-    await vite.build(buildViteConfig({
-      build: {
-        outDir: "dist/server",
-        ssr: "virtual:vinext-server-entry",
-        rollupOptions: {
-          output: {
-            entryFileNames: "entry.js",
+    await vite.build(
+      buildViteConfig({
+        build: {
+          outDir: "dist/client",
+          manifest: true,
+          ssrManifest: true,
+          rollupOptions: {
+            input: "virtual:vinext-client-entry",
+            output: clientOutputConfig,
+            treeshake: clientTreeshakeConfig,
           },
         },
-      },
-    }));
+      }),
+    );
+
+    console.log("  Building server...");
+    await vite.build(
+      buildViteConfig({
+        build: {
+          outDir: "dist/server",
+          ssr: "virtual:vinext-server-entry",
+          rollupOptions: {
+            output: {
+              entryFileNames: "entry.js",
+            },
+          },
+        },
+      }),
+    );
   }
 
   // ── Static export (output: "export") ──────────────────────────
@@ -356,14 +390,8 @@ async function start() {
 
   console.log(`\n  vinext start  (port ${port})\n`);
 
-  const { startProdServer } = (await import(
-    /* @vite-ignore */ "./server/prod-server.js"
-  )) as {
-    startProdServer: (opts: {
-      port: number;
-      host: string;
-      outDir: string;
-    }) => Promise<unknown>;
+  const { startProdServer } = (await import(/* @vite-ignore */ "./server/prod-server.js")) as {
+    startProdServer: (opts: { port: number; host: string; outDir: string }) => Promise<unknown>;
   };
 
   await startProdServer({
@@ -405,9 +433,13 @@ async function lint() {
     } else {
       console.log(
         "  No linter found. Install eslint or oxlint:\n\n" +
-          "    " + detectPackageManager(process.cwd()) + " eslint eslint-config-next\n" +
+          "    " +
+          detectPackageManager(process.cwd()) +
+          " eslint eslint-config-next\n" +
           "    # or\n" +
-          "    " + detectPackageManager(process.cwd()) + " oxlint\n",
+          "    " +
+          detectPackageManager(process.cwd()) +
+          " oxlint\n",
       );
       process.exit(1);
     }

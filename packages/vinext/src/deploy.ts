@@ -24,6 +24,7 @@ import {
   ensureESModule as _ensureESModule,
   renameCJSConfigs as _renameCJSConfigs,
   detectPackageManager as _detectPackageManager,
+  findInNodeModules as _findInNodeModules,
 } from "./utils/project.js";
 import { getReactUpgradeDeps } from "./init.js";
 import { runTPR } from "./cloudflare/tpr.js";
@@ -58,16 +59,16 @@ export interface DeployOptions {
 
 /** Deploy command flag definitions for util.parseArgs. */
 const deployArgOptions = {
-  help:               { type: "boolean", short: "h", default: false },
-  preview:            { type: "boolean", default: false },
-  env:                { type: "string" },
-  name:               { type: "string" },
-  "skip-build":       { type: "boolean", default: false },
-  "dry-run":          { type: "boolean", default: false },
+  help: { type: "boolean", short: "h", default: false },
+  preview: { type: "boolean", default: false },
+  env: { type: "string" },
+  name: { type: "string" },
+  "skip-build": { type: "boolean", default: false },
+  "dry-run": { type: "boolean", default: false },
   "experimental-tpr": { type: "boolean", default: false },
-  "tpr-coverage":     { type: "string" },
-  "tpr-limit":        { type: "string" },
-  "tpr-window":       { type: "string" },
+  "tpr-coverage": { type: "string" },
+  "tpr-limit": { type: "string" },
+  "tpr-window": { type: "string" },
 } as const;
 
 export function parseDeployArgs(args: string[]) {
@@ -113,13 +114,48 @@ interface ProjectInfo {
 
 // ─── Detection ───────────────────────────────────────────────────────────────
 
+/** Check whether a wrangler config file exists in the given directory. */
+export function hasWranglerConfig(root: string): boolean {
+  return (
+    fs.existsSync(path.join(root, "wrangler.jsonc")) ||
+    fs.existsSync(path.join(root, "wrangler.json")) ||
+    fs.existsSync(path.join(root, "wrangler.toml"))
+  );
+}
+
+/**
+ * Build the error message thrown when cloudflare() is missing from the Vite config.
+ * Shared between the build-time guard (index.ts configResolved) and the
+ * deploy-time guard (deploy.ts deploy()).
+ */
+export function formatMissingCloudflarePluginError(options: {
+  isAppRouter: boolean;
+  configFile?: string;
+}): string {
+  const cfArg = options.isAppRouter
+    ? '{\n      viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },\n    }'
+    : "";
+  const configRef = options.configFile ? options.configFile : "your Vite config";
+  return (
+    `[vinext] Missing @cloudflare/vite-plugin in ${configRef}.\n\n` +
+    `  Cloudflare Workers builds require the cloudflare() plugin.\n` +
+    `  Add it to ${configRef}:\n\n` +
+    `    import { cloudflare } from "@cloudflare/vite-plugin";\n\n` +
+    `    export default defineConfig({\n` +
+    `      plugins: [\n` +
+    `        vinext(),\n` +
+    `        cloudflare(${cfArg}),\n` +
+    `      ],\n` +
+    `    });\n\n` +
+    `  Or delete ${configRef} and re-run \`vinext deploy\` to auto-generate it.`
+  );
+}
+
 export function detectProject(root: string): ProjectInfo {
   const hasApp =
-    fs.existsSync(path.join(root, "app")) ||
-    fs.existsSync(path.join(root, "src", "app"));
+    fs.existsSync(path.join(root, "app")) || fs.existsSync(path.join(root, "src", "app"));
   const hasPages =
-    fs.existsSync(path.join(root, "pages")) ||
-    fs.existsSync(path.join(root, "src", "pages"));
+    fs.existsSync(path.join(root, "pages")) || fs.existsSync(path.join(root, "src", "pages"));
 
   // Prefer App Router if both exist
   const isAppRouter = hasApp;
@@ -130,25 +166,18 @@ export function detectProject(root: string): ProjectInfo {
     fs.existsSync(path.join(root, "vite.config.js")) ||
     fs.existsSync(path.join(root, "vite.config.mjs"));
 
-  const hasWranglerConfig =
-    fs.existsSync(path.join(root, "wrangler.jsonc")) ||
-    fs.existsSync(path.join(root, "wrangler.json")) ||
-    fs.existsSync(path.join(root, "wrangler.toml"));
+  const wranglerConfigExists = hasWranglerConfig(root);
 
   const hasWorkerEntry =
     fs.existsSync(path.join(root, "worker", "index.ts")) ||
     fs.existsSync(path.join(root, "worker", "index.js"));
 
-  // Check node_modules for installed packages
-  const hasCloudflarePlugin = fs.existsSync(
-    path.join(root, "node_modules", "@cloudflare", "vite-plugin"),
-  );
-  const hasRscPlugin = fs.existsSync(
-    path.join(root, "node_modules", "@vitejs", "plugin-rsc"),
-  );
-  const hasWrangler = fs.existsSync(
-    path.join(root, "node_modules", ".bin", "wrangler"),
-  );
+  // Check node_modules for installed packages.
+  // Walk up ancestor directories so that monorepo-hoisted packages are found
+  // even when node_modules lives at the workspace root rather than app root.
+  const hasCloudflarePlugin = _findInNodeModules(root, "@cloudflare/vite-plugin") !== null;
+  const hasRscPlugin = _findInNodeModules(root, "@vitejs/plugin-rsc") !== null;
+  const hasWrangler = _findInNodeModules(root, ".bin/wrangler") !== null;
 
   // Derive project name from package.json or directory name
   let projectName = path.basename(root);
@@ -160,7 +189,7 @@ export function detectProject(root: string): ProjectInfo {
         // Sanitize: Workers names must be lowercase alphanumeric + hyphens
         projectName = pkg.name
           .replace(/^@[^/]+\//, "") // strip npm scope
-          .toLowerCase()            // lowercase BEFORE stripping invalid chars
+          .toLowerCase() // lowercase BEFORE stripping invalid chars
           .replace(/[^a-z0-9-]/g, "-")
           .replace(/-+/g, "-")
           .replace(/^-|-$/g, "");
@@ -207,7 +236,7 @@ export function detectProject(root: string): ProjectInfo {
     isAppRouter,
     isPagesRouter,
     hasViteConfig,
-    hasWranglerConfig,
+    hasWranglerConfig: wranglerConfigExists,
     hasWorkerEntry,
     hasCloudflarePlugin,
     hasRscPlugin,
@@ -407,6 +436,11 @@ interface Env {
   };
 }
 
+interface ExecutionContext {
+  waitUntil(promise: Promise<unknown>): void;
+  passThroughOnException(): void;
+}
+
 // Image security config. SVG sources with .svg extension auto-skip the
 // optimization endpoint on the client side (served directly, no proxy).
 // To route SVGs through the optimizer (with security headers), set
@@ -414,7 +448,7 @@ interface Env {
 // const imageConfig: ImageConfig = { dangerouslyAllowSVG: true };
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     // Image optimization via Cloudflare Images binding.
@@ -431,8 +465,10 @@ export default {
       }, allowedWidths);
     }
 
-    // Delegate everything else to vinext
-    return handler.fetch(request);
+    // Delegate everything else to vinext, forwarding ctx so that
+    // ctx.waitUntil() is available to background cache writes and
+    // other deferred work via getRequestExecutionContext().
+    return handler.fetch(request, env, ctx);
   },
 };
 `;
@@ -451,6 +487,7 @@ import {
   matchRewrite,
   matchHeaders,
   requestContextFromRequest,
+  applyMiddlewareRequestHeaders,
   isExternalUrl,
   proxyExternalRequest,
   sanitizeDestination,
@@ -470,6 +507,11 @@ interface Env {
   };
 }
 
+interface ExecutionContext {
+  waitUntil(promise: Promise<unknown>): void;
+  passThroughOnException(): void;
+}
+
 // Extract config values (embedded at build time in the server entry)
 const basePath: string = vinextConfig?.basePath ?? "";
 const trailingSlash: boolean = vinextConfig?.trailingSlash ?? false;
@@ -482,8 +524,18 @@ const imageConfig: ImageConfig | undefined = vinextConfig?.images ? {
   contentSecurityPolicy: vinextConfig.images.contentSecurityPolicy,
 } : undefined;
 
+function hasBasePath(pathname: string, basePath: string): boolean {
+  if (!basePath) return false;
+  return pathname === basePath || pathname.startsWith(basePath + "/");
+}
+
+function stripBasePath(pathname: string, basePath: string): string {
+  if (!hasBasePath(pathname, basePath)) return pathname;
+  return pathname.slice(basePath.length) || "/";
+}
+
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     try {
       const url = new URL(request.url);
       let pathname = url.pathname;
@@ -497,10 +549,12 @@ export default {
       }
 
       // ── 1. Strip basePath ─────────────────────────────────────────
-      if (basePath && pathname.startsWith(basePath)) {
-        const stripped = pathname.slice(basePath.length) || "/";
-        urlWithQuery = stripped + url.search;
-        pathname = stripped;
+      {
+        const stripped = stripBasePath(pathname, basePath);
+        if (stripped !== pathname) {
+          urlWithQuery = stripped + url.search;
+          pathname = stripped;
+        }
       }
 
       // ── Image optimization via Cloudflare Images binding ──────────
@@ -517,7 +571,7 @@ export default {
       }
 
       // ── 2. Trailing slash normalization ────────────────────────────
-      if (pathname !== "/" && !pathname.startsWith("/api")) {
+      if (pathname !== "/" && pathname !== "/api" && !pathname.startsWith("/api/")) {
         const hasTrailing = pathname.endsWith("/");
         if (trailingSlash && !hasTrailing) {
           return new Response(null, {
@@ -555,13 +609,19 @@ export default {
       const middlewareHeaders: Record<string, string | string[]> = {};
       let middlewareRewriteStatus: number | undefined;
       if (typeof runMiddleware === "function") {
-        const result = await runMiddleware(request);
+        const result = await runMiddleware(request, ctx);
 
         if (!result.continue) {
           if (result.redirectUrl) {
+            const redirectHeaders = new Headers({ Location: result.redirectUrl });
+            if (result.responseHeaders) {
+              for (const [key, value] of result.responseHeaders) {
+                redirectHeaders.append(key, value);
+              }
+            }
             return new Response(null, {
               status: result.redirectStatus ?? 307,
-              headers: { Location: result.redirectUrl },
+              headers: redirectHeaders,
             });
           }
           if (result.response) {
@@ -597,38 +657,12 @@ export default {
         middlewareRewriteStatus = result.rewriteStatus;
       }
 
-      // Unpack x-middleware-request-* headers into the actual request so
-      // that renderPage / handleApiRoute see middleware-modified headers.
-      // Workers incoming request headers are immutable, so clone if needed.
-      const mwReqPrefix = "x-middleware-request-";
-      const mwReqHeaders: Record<string, string> = {};
-      for (const key of Object.keys(middlewareHeaders)) {
-        if (key.startsWith(mwReqPrefix)) {
-          const realName = key.slice(mwReqPrefix.length);
-          mwReqHeaders[realName] = middlewareHeaders[key] as string;
-          delete middlewareHeaders[key];
-        } else if (key.startsWith("x-middleware-")) {
-          delete middlewareHeaders[key];
-        }
-      }
-      if (Object.keys(mwReqHeaders).length > 0) {
-        const newHeaders = new Headers(request.headers);
-        for (const [k, v] of Object.entries(mwReqHeaders)) {
-          newHeaders.set(k, v);
-        }
-        request = new Request(request.url, {
-          method: request.method,
-          headers: newHeaders,
-          body: request.body,
-          // @ts-expect-error -- duplex needed for streaming request bodies
-          duplex: request.body ? "half" : undefined,
-        });
-      }
-
-      // Rebuild context after middleware has unpacked x-middleware-request-*
-      // headers into the cloned request. Used only for afterFiles and fallback
-      // rewrites, which run after middleware in the App Router execution order.
-      const postMwReqCtx = requestContextFromRequest(request);
+      // Unpack x-middleware-request-* headers into the actual request and strip
+      // all x-middleware-* internal signals. Rebuilds postMwReqCtx for use by
+      // beforeFiles, afterFiles, and fallback config rules (which run after
+      // middleware per the Next.js execution order).
+      const { postMwReqCtx, request: postMwReq } = applyMiddlewareRequestHeaders(middlewareHeaders, request);
+      request = postMwReq;
 
       let resolvedPathname = resolvedUrl.split("?")[0];
 
@@ -637,6 +671,8 @@ export default {
       // Set-Cookie) and override for everything else. Vary values are
       // comma-joined per HTTP spec. Set-Cookie values are accumulated
       // as arrays (RFC 6265 forbids comma-joining cookies).
+      // Middleware headers take precedence: skip config keys already set
+      // by middleware so middleware always wins for the same key.
       if (configHeaders.length) {
         const matched = matchHeaders(resolvedPathname, configHeaders, reqCtx);
         for (const h of matched) {
@@ -652,7 +688,9 @@ export default {
             }
           } else if (lk === "vary" && middlewareHeaders[lk]) {
             middlewareHeaders[lk] += ", " + h.value;
-          } else {
+          } else if (!(lk in middlewareHeaders)) {
+            // Middleware headers take precedence: only set if middleware
+            // did not already place this key on the response.
             middlewareHeaders[lk] = h.value;
           }
         }
@@ -663,7 +701,9 @@ export default {
         const redirect = matchRedirect(resolvedPathname, configRedirects, reqCtx);
         if (redirect) {
           const dest = sanitizeDestination(
-            basePath && !redirect.destination.startsWith(basePath)
+            basePath &&
+              !isExternalUrl(redirect.destination) &&
+              !hasBasePath(redirect.destination, basePath)
               ? basePath + redirect.destination
               : redirect.destination,
           );
@@ -709,7 +749,7 @@ export default {
       // ── 9. Page routes ────────────────────────────────────────────
       let response: Response | undefined;
       if (typeof renderPage === "function") {
-        response = await renderPage(request, resolvedUrl, null);
+        response = await renderPage(request, resolvedUrl, null, ctx);
 
         // ── 10. Fallback rewrites (if SSR returned 404) ─────────────
         if (response && response.status === 404 && configRewrites.fallback?.length) {
@@ -718,7 +758,7 @@ export default {
             if (isExternalUrl(fallbackRewrite)) {
               return proxyExternalRequest(request, fallbackRewrite);
             }
-            response = await renderPage(request, fallbackRewrite, null);
+            response = await renderPage(request, fallbackRewrite, null, ctx);
           }
         }
       }
@@ -908,10 +948,8 @@ export function getMissingDeps(
     }
   }
   if (info.hasMDX) {
-    // Check if @mdx-js/rollup is already installed
-    const hasMdxRollup = fs.existsSync(
-      path.join(info.root, "node_modules", "@mdx-js", "rollup"),
-    );
+    // Check if @mdx-js/rollup is already installed (walk up for monorepo hoisting)
+    const hasMdxRollup = _findInNodeModules(info.root, "@mdx-js/rollup") !== null;
     if (!hasMdxRollup) {
       missing.push({ name: "@mdx-js/rollup", version: "latest" });
     }
@@ -942,6 +980,35 @@ interface GeneratedFile {
   path: string;
   content: string;
   description: string;
+}
+
+/**
+ * Check whether an existing vite.config file already imports and uses the
+ * Cloudflare Vite plugin. This is a heuristic text scan — it doesn't execute
+ * the config — so it may produce false negatives for unusual configurations.
+ *
+ * Returns true if `@cloudflare/vite-plugin` appears to be configured, false
+ * if it is missing (meaning the build will fail with "could not resolve
+ * virtual:vinext-rsc-entry").
+ */
+export function viteConfigHasCloudflarePlugin(root: string): boolean {
+  const candidates = [
+    path.join(root, "vite.config.ts"),
+    path.join(root, "vite.config.js"),
+    path.join(root, "vite.config.mjs"),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      try {
+        const content = fs.readFileSync(candidate, "utf-8");
+        return content.includes("@cloudflare/vite-plugin");
+      } catch {
+        // unreadable — assume it might be fine
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 export function getFilesToGenerate(info: ProjectInfo): GeneratedFile[] {
@@ -1018,7 +1085,9 @@ export interface WranglerDeployArgs {
   env: string | undefined;
 }
 
-export function buildWranglerDeployArgs(options: Pick<DeployOptions, "preview" | "env">): WranglerDeployArgs {
+export function buildWranglerDeployArgs(
+  options: Pick<DeployOptions, "preview" | "env">,
+): WranglerDeployArgs {
   const args = ["deploy"];
   const env = options.env || (options.preview ? "preview" : undefined);
   if (env) {
@@ -1028,7 +1097,11 @@ export function buildWranglerDeployArgs(options: Pick<DeployOptions, "preview" |
 }
 
 function runWranglerDeploy(root: string, options: Pick<DeployOptions, "preview" | "env">): string {
-  const wranglerBin = path.join(root, "node_modules", ".bin", "wrangler");
+  // Walk up ancestor directories so the binary is found even when node_modules
+  // is hoisted to the workspace root in a monorepo.
+  const wranglerBin =
+    _findInNodeModules(root, ".bin/wrangler") ??
+    path.join(root, "node_modules", ".bin", "wrangler"); // fallback for error message clarity
 
   const execOpts: ExecSyncOptions = {
     cwd: root,
@@ -1096,7 +1169,9 @@ export async function deploy(options: DeployOptions): Promise<void> {
     if (reactUpgrade.length > 0) {
       const installCmd = detectPackageManager(root).replace(/ -D$/, "");
       const [pm, ...pmArgs] = installCmd.split(" ");
-      console.log(`  Upgrading ${reactUpgrade.map(d => d.replace(/@latest$/, "")).join(", ")}...`);
+      console.log(
+        `  Upgrading ${reactUpgrade.map((d) => d.replace(/@latest$/, "")).join(", ")}...`,
+      );
       execFileSync(pm, [...pmArgs, ...reactUpgrade], { cwd: root, stdio: "inherit" });
     }
   }
@@ -1127,6 +1202,13 @@ export async function deploy(options: DeployOptions): Promise<void> {
   if (filesToGenerate.length > 0) {
     console.log();
     writeGeneratedFiles(filesToGenerate);
+  }
+
+  // Fail if an existing Vite config is missing the Cloudflare plugin.
+  // This is the most common cause of "could not resolve virtual:vinext-rsc-entry"
+  // errors — `vinext init` generates a minimal local-dev config without it.
+  if (info.hasViteConfig && !viteConfigHasCloudflarePlugin(root)) {
+    throw new Error(formatMissingCloudflarePluginError({ isAppRouter: info.isAppRouter }));
   }
 
   if (options.dryRun) {

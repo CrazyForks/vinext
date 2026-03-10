@@ -8,6 +8,8 @@
 import { useState, useEffect, useCallback, useMemo, createElement, type ReactElement } from "react";
 import { RouterContext } from "./internal/router-context.js";
 import { isValidModulePath } from "../client/validate-module-path.js";
+import { toSameOriginPath } from "./url-utils.js";
+import { stripBasePath } from "../utils/base-path.js";
 
 /** basePath from next.config.js, injected by the plugin at build time */
 const __basePath: string = process.env.__NEXT_ROUTER_BASEPATH ?? "";
@@ -18,14 +20,11 @@ function withBasePath(p: string): string {
   return __basePath + p;
 }
 
-/** Strip basePath prefix from a browser pathname */
-function stripBasePath(p: string): string {
-  if (!__basePath) return p;
-  if (p.startsWith(__basePath)) return p.slice(__basePath.length) || "/";
-  return p;
-}
-
-type BeforePopStateCallback = (state: { url: string; as: string; options: { shallow: boolean } }) => boolean;
+type BeforePopStateCallback = (state: {
+  url: string;
+  as: string;
+  options: { shallow: boolean };
+}) => boolean;
 
 interface NextRouter {
   /** Current pathname */
@@ -124,7 +123,7 @@ function resolveUrl(url: string | UrlObject): string {
  */
 export function applyNavigationLocale(url: string, locale?: string): string {
   if (!locale || typeof window === "undefined") return url;
-  const defaultLocale = (window as any).__VINEXT_DEFAULT_LOCALE__;
+  const defaultLocale = window.__VINEXT_DEFAULT_LOCALE__;
   // Default locale doesn't get a prefix
   if (locale === defaultLocale) return url;
   // Don't double-prefix
@@ -201,7 +200,9 @@ interface SSRContext {
 let _ssrContext: SSRContext | null = null;
 
 let _getSSRContext = (): SSRContext | null => _ssrContext;
-let _setSSRContextImpl = (ctx: SSRContext | null): void => { _ssrContext = ctx; };
+let _setSSRContextImpl = (ctx: SSRContext | null): void => {
+  _ssrContext = ctx;
+};
 
 /**
  * Register ALS-backed state accessors. Called by router-state.ts on import.
@@ -257,11 +258,11 @@ function getPathnameAndQuery(): {
     }
     return { pathname: "/", query: {}, asPath: "/" };
   }
-  const pathname = stripBasePath(window.location.pathname);
+  const pathname = stripBasePath(window.location.pathname, __basePath);
   const query: Record<string, string> = {};
   // Include dynamic route params from __NEXT_DATA__ (e.g., { id: "42" } from /posts/[id]).
   // Only include keys that are part of the route pattern (not stale query params).
-  const nextData = (window as any).__NEXT_DATA__;
+  const nextData = window.__NEXT_DATA__;
   if (nextData && nextData.query && nextData.page) {
     const routeParamNames = extractRouteParamNames(nextData.page);
     for (const key of routeParamNames) {
@@ -290,8 +291,7 @@ let _navInProgress = false;
 async function navigateClient(url: string): Promise<void> {
   if (typeof window === "undefined") return;
 
-  const win = window as any;
-  const root = win.__VINEXT_ROOT__;
+  const root = window.__VINEXT_ROOT__;
   if (!root) {
     // No React root yet — fall back to hard navigation
     window.location.href = url;
@@ -321,12 +321,11 @@ async function navigateClient(url: string): Promise<void> {
 
     const nextData = JSON.parse(match[1]);
     const { pageProps } = nextData.props;
-    win.__NEXT_DATA__ = nextData;
+    window.__NEXT_DATA__ = nextData;
 
     // Get the page module URL from __NEXT_DATA__.__vinext (preferred),
     // or fall back to parsing the hydration script
-    let pageModuleUrl: string | undefined =
-      nextData.__vinext?.pageModuleUrl;
+    let pageModuleUrl: string | undefined = nextData.__vinext?.pageModuleUrl;
 
     if (!pageModuleUrl) {
       // Legacy fallback: try to find the module URL in the inline script
@@ -361,9 +360,8 @@ async function navigateClient(url: string): Promise<void> {
     const React = (await import("react")).default;
 
     // Re-render with the new page, loading _app if needed
-    let AppComponent = win.__VINEXT_APP__;
-    const appModuleUrl: string | undefined =
-      nextData.__vinext?.appModuleUrl;
+    let AppComponent = window.__VINEXT_APP__;
+    const appModuleUrl: string | undefined = nextData.__vinext?.appModuleUrl;
 
     if (!AppComponent && appModuleUrl) {
       if (!isValidModulePath(appModuleUrl)) {
@@ -372,7 +370,7 @@ async function navigateClient(url: string): Promise<void> {
         try {
           const appModule = await import(/* @vite-ignore */ appModuleUrl);
           AppComponent = appModule.default;
-          win.__VINEXT_APP__ = AppComponent;
+          window.__VINEXT_APP__ = AppComponent;
         } catch {
           // _app not available — continue without it
         }
@@ -422,19 +420,12 @@ function buildRouterValue(
   },
 ): NextRouter {
   const _ssrState = _getSSRContext();
-  const locale = typeof window === "undefined"
-    ? _ssrState?.locale
-    : (window as any).__VINEXT_LOCALE__;
-  const locales = typeof window === "undefined"
-    ? _ssrState?.locales
-    : (window as any).__VINEXT_LOCALES__;
-  const defaultLocale = typeof window === "undefined"
-    ? _ssrState?.defaultLocale
-    : (window as any).__VINEXT_DEFAULT_LOCALE__;
+  const locale = typeof window === "undefined" ? _ssrState?.locale : window.__VINEXT_LOCALE__;
+  const locales = typeof window === "undefined" ? _ssrState?.locales : window.__VINEXT_LOCALES__;
+  const defaultLocale =
+    typeof window === "undefined" ? _ssrState?.defaultLocale : window.__VINEXT_DEFAULT_LOCALE__;
 
-  const route = typeof window !== "undefined"
-    ? ((window as any).__NEXT_DATA__?.page ?? pathname)
-    : pathname;
+  const route = typeof window !== "undefined" ? (window.__NEXT_DATA__?.page ?? pathname) : pathname;
 
   return {
     pathname,
@@ -447,7 +438,7 @@ function buildRouterValue(
     defaultLocale,
     isReady: true,
     isPreview: false,
-    isFallback: typeof window !== "undefined" && (window as any).__NEXT_DATA__?.isFallback === true,
+    isFallback: typeof window !== "undefined" && window.__NEXT_DATA__?.isFallback === true,
     ...methods,
     events: routerEvents,
   };
@@ -481,19 +472,31 @@ export function useRouter(): NextRouter {
   }, []);
 
   const push = useCallback(
-    async (url: string | UrlObject, _as?: string, options?: TransitionOptions): Promise<boolean> => {
-      const resolved = applyNavigationLocale(resolveUrl(url), options?.locale);
+    async (
+      url: string | UrlObject,
+      _as?: string,
+      options?: TransitionOptions,
+    ): Promise<boolean> => {
+      let resolved = applyNavigationLocale(resolveUrl(url), options?.locale);
 
-      // External URLs — delegate to browser
+      // External URLs — delegate to browser (unless same-origin)
       if (isExternalUrl(resolved)) {
-        window.location.assign(resolved);
-        return true;
+        const localPath = toSameOriginPath(resolved);
+        if (localPath == null) {
+          window.location.assign(resolved);
+          return true;
+        }
+        resolved = localPath;
       }
 
       // Hash-only change — no page fetch needed
       if (isHashOnlyChange(resolved)) {
         const hash = resolved.includes("#") ? resolved.slice(resolved.indexOf("#")) : "";
-        window.history.pushState({}, "", resolved.startsWith("#") ? resolved : withBasePath(resolved));
+        window.history.pushState(
+          {},
+          "",
+          resolved.startsWith("#") ? resolved : withBasePath(resolved),
+        );
         scrollToHash(hash);
         setState(getPathnameAndQuery());
         window.dispatchEvent(new CustomEvent("vinext:navigate"));
@@ -524,19 +527,31 @@ export function useRouter(): NextRouter {
   );
 
   const replace = useCallback(
-    async (url: string | UrlObject, _as?: string, options?: TransitionOptions): Promise<boolean> => {
-      const resolved = applyNavigationLocale(resolveUrl(url), options?.locale);
+    async (
+      url: string | UrlObject,
+      _as?: string,
+      options?: TransitionOptions,
+    ): Promise<boolean> => {
+      let resolved = applyNavigationLocale(resolveUrl(url), options?.locale);
 
-      // External URLs — delegate to browser
+      // External URLs — delegate to browser (unless same-origin)
       if (isExternalUrl(resolved)) {
-        window.location.replace(resolved);
-        return true;
+        const localPath = toSameOriginPath(resolved);
+        if (localPath == null) {
+          window.location.replace(resolved);
+          return true;
+        }
+        resolved = localPath;
       }
 
       // Hash-only change — no page fetch needed
       if (isHashOnlyChange(resolved)) {
         const hash = resolved.includes("#") ? resolved.slice(resolved.indexOf("#")) : "";
-        window.history.replaceState({}, "", resolved.startsWith("#") ? resolved : withBasePath(resolved));
+        window.history.replaceState(
+          {},
+          "",
+          resolved.startsWith("#") ? resolved : withBasePath(resolved),
+        );
         scrollToHash(hash);
         setState(getPathnameAndQuery());
         window.dispatchEvent(new CustomEvent("vinext:navigate"));
@@ -585,14 +600,17 @@ export function useRouter(): NextRouter {
   }, []);
 
   const router = useMemo(
-    (): NextRouter => buildRouterValue(pathname, query, asPath, {
-      push,
-      replace,
-      back,
-      reload,
-      prefetch,
-      beforePopState: (cb: BeforePopStateCallback) => { _beforePopStateCb = cb; },
-    }),
+    (): NextRouter =>
+      buildRouterValue(pathname, query, asPath, {
+        push,
+        replace,
+        back,
+        reload,
+        prefetch,
+        beforePopState: (cb: BeforePopStateCallback) => {
+          _beforePopStateCb = cb;
+        },
+      }),
     [pathname, query, asPath, push, replace, back, reload, prefetch],
   );
 
@@ -609,11 +627,15 @@ let _beforePopStateCb: BeforePopStateCallback | undefined;
 if (typeof window !== "undefined") {
   window.addEventListener("popstate", (e: PopStateEvent) => {
     const browserUrl = window.location.pathname + window.location.search;
-    const appUrl = stripBasePath(window.location.pathname) + window.location.search;
+    const appUrl = stripBasePath(window.location.pathname, __basePath) + window.location.search;
 
     // Check beforePopState callback
     if (_beforePopStateCb !== undefined) {
-      const shouldContinue = (_beforePopStateCb as BeforePopStateCallback)({ url: appUrl, as: appUrl, options: { shallow: false } });
+      const shouldContinue = (_beforePopStateCb as BeforePopStateCallback)({
+        url: appUrl,
+        as: appUrl,
+        options: { shallow: false },
+      });
       if (!shouldContinue) return;
     }
 
@@ -653,18 +675,26 @@ export function wrapWithRouterContext(element: ReactElement): ReactElement {
 // Also export a default Router singleton for `import Router from 'next/router'`
 const Router = {
   push: async (url: string | UrlObject, _as?: string, options?: TransitionOptions) => {
-    const resolved = applyNavigationLocale(resolveUrl(url), options?.locale);
+    let resolved = applyNavigationLocale(resolveUrl(url), options?.locale);
 
-    // External URLs
+    // External URLs (unless same-origin)
     if (isExternalUrl(resolved)) {
-      window.location.assign(resolved);
-      return true;
+      const localPath = toSameOriginPath(resolved);
+      if (localPath == null) {
+        window.location.assign(resolved);
+        return true;
+      }
+      resolved = localPath;
     }
 
     // Hash-only change
     if (isHashOnlyChange(resolved)) {
       const hash = resolved.includes("#") ? resolved.slice(resolved.indexOf("#")) : "";
-      window.history.pushState({}, "", resolved.startsWith("#") ? resolved : withBasePath(resolved));
+      window.history.pushState(
+        {},
+        "",
+        resolved.startsWith("#") ? resolved : withBasePath(resolved),
+      );
       scrollToHash(hash);
       window.dispatchEvent(new CustomEvent("vinext:navigate"));
       return true;
@@ -689,18 +719,26 @@ const Router = {
     return true;
   },
   replace: async (url: string | UrlObject, _as?: string, options?: TransitionOptions) => {
-    const resolved = applyNavigationLocale(resolveUrl(url), options?.locale);
+    let resolved = applyNavigationLocale(resolveUrl(url), options?.locale);
 
-    // External URLs
+    // External URLs (unless same-origin)
     if (isExternalUrl(resolved)) {
-      window.location.replace(resolved);
-      return true;
+      const localPath = toSameOriginPath(resolved);
+      if (localPath == null) {
+        window.location.replace(resolved);
+        return true;
+      }
+      resolved = localPath;
     }
 
     // Hash-only change
     if (isHashOnlyChange(resolved)) {
       const hash = resolved.includes("#") ? resolved.slice(resolved.indexOf("#")) : "";
-      window.history.replaceState({}, "", resolved.startsWith("#") ? resolved : withBasePath(resolved));
+      window.history.replaceState(
+        {},
+        "",
+        resolved.startsWith("#") ? resolved : withBasePath(resolved),
+      );
       scrollToHash(hash);
       window.dispatchEvent(new CustomEvent("vinext:navigate"));
       return true;

@@ -16,7 +16,16 @@ import {
   buildWranglerDeployArgs,
   parseDeployArgs,
   isPackageResolvable,
+  viteConfigHasCloudflarePlugin,
+  hasWranglerConfig,
+  formatMissingCloudflarePluginError,
 } from "../packages/vinext/src/deploy.js";
+import {
+  detectPackageManager,
+  detectPackageManagerName,
+  findInNodeModules,
+  ensureViteConfigCompatibility,
+} from "../packages/vinext/src/utils/project.js";
 import { computeLazyChunks } from "../packages/vinext/src/index.js";
 import { mergeHeaders } from "../packages/vinext/src/server/worker-utils.js";
 
@@ -118,9 +127,12 @@ describe("parseDeployArgs", () => {
   it("parses numeric TPR flags from string values", () => {
     const parsed = parseDeployArgs([
       "--experimental-tpr",
-      "--tpr-coverage", "95",
-      "--tpr-limit", "500",
-      "--tpr-window", "48",
+      "--tpr-coverage",
+      "95",
+      "--tpr-limit",
+      "500",
+      "--tpr-window",
+      "48",
     ]);
     expect(parsed.experimentalTPR).toBe(true);
     expect(parsed.tprCoverage).toBe(95);
@@ -304,7 +316,11 @@ describe("generateWranglerConfig", () => {
 
   it("includes KV namespace when ISR detected", () => {
     mkdir(tmpDir, "app");
-    writeFile(tmpDir, "app/page.tsx", "export const revalidate = 30;\nexport default function() { return <div/> }");
+    writeFile(
+      tmpDir,
+      "app/page.tsx",
+      "export const revalidate = 30;\nexport default function() { return <div/> }",
+    );
     const info = detectProject(tmpDir);
     const config = generateWranglerConfig(info);
     const parsed = JSON.parse(config);
@@ -340,7 +356,7 @@ describe("generateAppRouterWorkerEntry", () => {
   it("generates valid TypeScript", () => {
     const content = generateAppRouterWorkerEntry();
     expect(content).toContain("export default");
-    expect(content).toContain("async fetch(request: Request, env: Env)");
+    expect(content).toContain("async fetch(request: Request, env: Env, ctx: ExecutionContext)");
     expect(content).toContain("Promise<Response>");
   });
 
@@ -351,7 +367,7 @@ describe("generateAppRouterWorkerEntry", () => {
 
   it("delegates to handler.fetch", () => {
     const content = generateAppRouterWorkerEntry();
-    expect(content).toContain("handler.fetch(request)");
+    expect(content).toContain("handler.fetch(request, env, ctx)");
   });
 
   it("includes auto-generated comment", () => {
@@ -378,6 +394,12 @@ describe("generateAppRouterWorkerEntry", () => {
     expect(content).toContain("ASSETS");
   });
 
+  it("declares ExecutionContext interface", () => {
+    const content = generateAppRouterWorkerEntry();
+    expect(content).toContain("interface ExecutionContext");
+    expect(content).toContain("waitUntil");
+  });
+
   it("passes image handlers inline to handleImageOptimization", () => {
     const content = generateAppRouterWorkerEntry();
     expect(content).toContain("fetchAsset:");
@@ -398,7 +420,7 @@ describe("generatePagesRouterWorkerEntry", () => {
   it("generates valid TypeScript", () => {
     const content = generatePagesRouterWorkerEntry();
     expect(content).toContain("export default");
-    expect(content).toContain("async fetch(request: Request, env: Env)");
+    expect(content).toContain("async fetch(request: Request, env: Env, ctx: ExecutionContext)");
     expect(content).toContain("Promise<Response>");
   });
 
@@ -414,8 +436,12 @@ describe("generatePagesRouterWorkerEntry", () => {
     expect(content).toContain("runMiddleware");
     expect(content).toContain("vinextConfig");
     // Both should come from the same virtual import
-    expect(content).toMatch(/import\s*\{[^}]*runMiddleware[^}]*\}\s*from\s*"virtual:vinext-server-entry"/);
-    expect(content).toMatch(/import\s*\{[^}]*vinextConfig[^}]*\}\s*from\s*"virtual:vinext-server-entry"/);
+    expect(content).toMatch(
+      /import\s*\{[^}]*runMiddleware[^}]*\}\s*from\s*"virtual:vinext-server-entry"/,
+    );
+    expect(content).toMatch(
+      /import\s*\{[^}]*vinextConfig[^}]*\}\s*from\s*"virtual:vinext-server-entry"/,
+    );
   });
 
   it("imports config matchers from vinext/config/config-matchers", () => {
@@ -432,7 +458,7 @@ describe("generatePagesRouterWorkerEntry", () => {
   it("runs middleware before routing", () => {
     const content = generatePagesRouterWorkerEntry();
     // Middleware should appear before API route check
-    const middlewarePos = content.indexOf("runMiddleware(request)");
+    const middlewarePos = content.indexOf("runMiddleware(request, ctx)");
     const apiRoutePos = content.indexOf('resolvedPathname.startsWith("/api/")');
     expect(middlewarePos).toBeGreaterThan(-1);
     expect(apiRoutePos).toBeGreaterThan(-1);
@@ -443,6 +469,17 @@ describe("generatePagesRouterWorkerEntry", () => {
     const content = generatePagesRouterWorkerEntry();
     expect(content).toContain("result.redirectUrl");
     expect(content).toContain("result.redirectStatus");
+  });
+
+  it("preserves responseHeaders on middleware redirect", () => {
+    const content = generatePagesRouterWorkerEntry();
+    // Extract the redirect branch: from "if (result.redirectUrl)" to the
+    // next "if (result.response)". This block must reference responseHeaders
+    // so that Set-Cookie and other headers survive the redirect.
+    const redirectStart = content.indexOf("if (result.redirectUrl)");
+    const redirectEnd = content.indexOf("if (result.response)", redirectStart);
+    const redirectBlock = content.slice(redirectStart, redirectEnd);
+    expect(redirectBlock).toContain("responseHeaders");
   });
 
   it("handles middleware rewrites", () => {
@@ -480,7 +517,10 @@ describe("generatePagesRouterWorkerEntry", () => {
   it("handles basePath stripping and creates a new request with stripped URL for middleware", () => {
     const content = generatePagesRouterWorkerEntry();
     expect(content).toContain("basePath");
-    expect(content).toContain("pathname.startsWith(basePath)");
+    expect(content).toContain("function hasBasePath(pathname: string, basePath: string): boolean");
+    expect(content).toContain("function stripBasePath(pathname: string, basePath: string): string");
+    expect(content).toContain('pathname === basePath || pathname.startsWith(basePath + "/")');
+    expect(content).toContain("const stripped = stripBasePath(pathname, basePath);");
     // After stripping, a new request with the stripped URL must be created
     // so middleware matchers see the basePath-free pathname (matching prod-server)
     expect(content).toContain("strippedUrl.pathname = pathname");
@@ -576,11 +616,11 @@ describe("generatePagesRouterWorkerEntry", () => {
 
   it("preserves x-middleware-request-* headers for prod request override handling", () => {
     const content = generatePagesRouterWorkerEntry();
-    // Worker entry must unpack x-middleware-request-* into the actual request
-    expect(content).toContain('const mwReqPrefix = "x-middleware-request-"');
-    expect(content).toContain('key.startsWith(mwReqPrefix)');
-    // Worker entry must also strip remaining x-middleware-* headers (defense-in-depth)
-    expect(content).toContain('key.startsWith("x-middleware-")');
+    // Worker entry must import applyMiddlewareRequestHeaders from config-matchers
+    // (the logic for unpacking x-middleware-request-* and stripping x-middleware-*
+    // now lives there rather than being inlined in the worker entry).
+    expect(content).toContain("applyMiddlewareRequestHeaders");
+    expect(content).toContain("vinext/config/config-matchers");
   });
 
   it("handles external rewrites via proxyExternalRequest", () => {
@@ -597,7 +637,7 @@ describe("generatePagesRouterWorkerEntry", () => {
   it("builds reqCtx before middleware runs", () => {
     const content = generatePagesRouterWorkerEntry();
     const reqCtxPos = content.indexOf("requestContextFromRequest(request)");
-    const middlewarePos = content.indexOf("runMiddleware(request)");
+    const middlewarePos = content.indexOf("runMiddleware(request, ctx)");
     expect(reqCtxPos).toBeGreaterThan(-1);
     expect(middlewarePos).toBeGreaterThan(-1);
     expect(reqCtxPos).toBeLessThan(middlewarePos);
@@ -605,11 +645,17 @@ describe("generatePagesRouterWorkerEntry", () => {
 
   it("checks image optimization after basePath stripping", () => {
     const content = generatePagesRouterWorkerEntry();
-    const basePathPos = content.indexOf("pathname.startsWith(basePath)");
+    const basePathPos = content.indexOf("const stripped = stripBasePath(pathname, basePath);");
     const imagePos = content.indexOf('pathname === "/_vinext/image"');
     expect(basePathPos).toBeGreaterThan(-1);
     expect(imagePos).toBeGreaterThan(-1);
     expect(basePathPos).toBeLessThan(imagePos);
+  });
+
+  it("uses segment-boundary check before skipping redirect destination prefixing", () => {
+    const content = generatePagesRouterWorkerEntry();
+    expect(content).toContain("!isExternalUrl(redirect.destination)");
+    expect(content).toContain("!hasBasePath(redirect.destination, basePath)");
   });
 });
 
@@ -654,9 +700,7 @@ describe("getMissingDeps", () => {
     info.hasRscPlugin = true;
 
     const missing = getMissingDeps(info);
-    expect(missing).toContainEqual(
-      expect.objectContaining({ name: "@cloudflare/vite-plugin" }),
-    );
+    expect(missing).toContainEqual(expect.objectContaining({ name: "@cloudflare/vite-plugin" }));
   });
 
   it("reports missing wrangler", () => {
@@ -667,9 +711,7 @@ describe("getMissingDeps", () => {
     info.hasRscPlugin = true;
 
     const missing = getMissingDeps(info);
-    expect(missing).toContainEqual(
-      expect.objectContaining({ name: "wrangler" }),
-    );
+    expect(missing).toContainEqual(expect.objectContaining({ name: "wrangler" }));
   });
 
   it("reports missing @vitejs/plugin-rsc for App Router", () => {
@@ -680,9 +722,7 @@ describe("getMissingDeps", () => {
     info.hasRscPlugin = false;
 
     const missing = getMissingDeps(info);
-    expect(missing).toContainEqual(
-      expect.objectContaining({ name: "@vitejs/plugin-rsc" }),
-    );
+    expect(missing).toContainEqual(expect.objectContaining({ name: "@vitejs/plugin-rsc" }));
   });
 
   it("does not require @vitejs/plugin-rsc for Pages Router", () => {
@@ -693,9 +733,7 @@ describe("getMissingDeps", () => {
     info.hasRscPlugin = false;
 
     const missing = getMissingDeps(info);
-    expect(missing).not.toContainEqual(
-      expect.objectContaining({ name: "@vitejs/plugin-rsc" }),
-    );
+    expect(missing).not.toContainEqual(expect.objectContaining({ name: "@vitejs/plugin-rsc" }));
   });
 
   it("reports missing react-server-dom-webpack for App Router", () => {
@@ -710,9 +748,7 @@ describe("getMissingDeps", () => {
     // on filesystem isolation in tmpdir.)
     const notResolvable = () => false;
     const missing = getMissingDeps(info, notResolvable);
-    expect(missing).toContainEqual(
-      expect.objectContaining({ name: "react-server-dom-webpack" }),
-    );
+    expect(missing).toContainEqual(expect.objectContaining({ name: "react-server-dom-webpack" }));
   });
 
   it("does not require react-server-dom-webpack for Pages Router", () => {
@@ -881,6 +917,160 @@ describe("getFilesToGenerate", () => {
   });
 });
 
+// ─── viteConfigHasCloudflarePlugin ───────────────────────────────────────────
+
+describe("viteConfigHasCloudflarePlugin", () => {
+  it("returns true when vite.config.ts imports @cloudflare/vite-plugin", () => {
+    writeFile(
+      tmpDir,
+      "vite.config.ts",
+      `
+import { cloudflare } from "@cloudflare/vite-plugin";
+import { defineConfig } from "vite";
+export default defineConfig({ plugins: [cloudflare()] });
+`,
+    );
+    expect(viteConfigHasCloudflarePlugin(tmpDir)).toBe(true);
+  });
+
+  it("returns true for App Router config with viteEnvironment", () => {
+    writeFile(
+      tmpDir,
+      "vite.config.ts",
+      `
+import { cloudflare } from "@cloudflare/vite-plugin";
+import vinext from "vinext";
+import { defineConfig } from "vite";
+export default defineConfig({
+  plugins: [vinext(), cloudflare({ viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] } })],
+});
+`,
+    );
+    expect(viteConfigHasCloudflarePlugin(tmpDir)).toBe(true);
+  });
+
+  it("returns false when vite.config.ts does not import @cloudflare/vite-plugin", () => {
+    writeFile(
+      tmpDir,
+      "vite.config.ts",
+      `
+import vinext from "vinext";
+import { defineConfig } from "vite";
+export default defineConfig({ plugins: [vinext()] });
+`,
+    );
+    expect(viteConfigHasCloudflarePlugin(tmpDir)).toBe(false);
+  });
+
+  it("returns false for the minimal config generated by vinext init", () => {
+    // init generates a local-dev-only config without the cloudflare plugin
+    writeFile(
+      tmpDir,
+      "vite.config.ts",
+      `import vinext from "vinext";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [vinext()],
+});
+`,
+    );
+    expect(viteConfigHasCloudflarePlugin(tmpDir)).toBe(false);
+  });
+
+  it("returns true for vite.config.js", () => {
+    writeFile(
+      tmpDir,
+      "vite.config.js",
+      `
+import { cloudflare } from "@cloudflare/vite-plugin";
+export default { plugins: [cloudflare()] };
+`,
+    );
+    expect(viteConfigHasCloudflarePlugin(tmpDir)).toBe(true);
+  });
+
+  it("returns true for vite.config.mjs", () => {
+    writeFile(
+      tmpDir,
+      "vite.config.mjs",
+      `
+import { cloudflare } from "@cloudflare/vite-plugin";
+export default { plugins: [cloudflare()] };
+`,
+    );
+    expect(viteConfigHasCloudflarePlugin(tmpDir)).toBe(true);
+  });
+
+  it("returns false when no vite config file exists", () => {
+    // tmpDir has no vite config
+    expect(viteConfigHasCloudflarePlugin(tmpDir)).toBe(false);
+  });
+});
+
+// ─── hasWranglerConfig ───────────────────────────────────────────────────────
+
+describe("hasWranglerConfig", () => {
+  it("returns true when wrangler.jsonc exists", () => {
+    writeFile(tmpDir, "wrangler.jsonc", "{}");
+    expect(hasWranglerConfig(tmpDir)).toBe(true);
+  });
+
+  it("returns true when wrangler.json exists", () => {
+    writeFile(tmpDir, "wrangler.json", "{}");
+    expect(hasWranglerConfig(tmpDir)).toBe(true);
+  });
+
+  it("returns true when wrangler.toml exists", () => {
+    writeFile(tmpDir, "wrangler.toml", "");
+    expect(hasWranglerConfig(tmpDir)).toBe(true);
+  });
+
+  it("returns false when none exist", () => {
+    expect(hasWranglerConfig(tmpDir)).toBe(false);
+  });
+});
+
+// ─── formatMissingCloudflarePluginError ─────────────────────────────────────
+
+describe("formatMissingCloudflarePluginError", () => {
+  it("includes viteEnvironment config when isAppRouter is true", () => {
+    const msg = formatMissingCloudflarePluginError({ isAppRouter: true });
+    expect(msg).toContain("viteEnvironment");
+    expect(msg).toContain('childEnvironments: ["ssr"]');
+  });
+
+  it("omits viteEnvironment config when isAppRouter is false", () => {
+    const msg = formatMissingCloudflarePluginError({ isAppRouter: false });
+    expect(msg).not.toContain("viteEnvironment");
+  });
+
+  it("includes actual config file path when configFile is provided", () => {
+    const msg = formatMissingCloudflarePluginError({
+      isAppRouter: false,
+      configFile: "/project/vite.config.mts",
+    });
+    expect(msg).toContain("/project/vite.config.mts");
+  });
+
+  it("uses generic 'your Vite config' when configFile is undefined", () => {
+    const msg = formatMissingCloudflarePluginError({ isAppRouter: false });
+    expect(msg).toContain("your Vite config");
+  });
+
+  it("never hardcodes vite.config.ts when no configFile given", () => {
+    const msg = formatMissingCloudflarePluginError({ isAppRouter: false });
+    expect(msg).not.toMatch(/vite\.config\.ts/);
+    expect(msg).not.toMatch(/vite\.config\.js/);
+    expect(msg).not.toMatch(/vite\.config\.mjs/);
+  });
+
+  it("always starts with the [vinext] prefix", () => {
+    const msg = formatMissingCloudflarePluginError({ isAppRouter: false });
+    expect(msg).toMatch(/^\[vinext\] Missing @cloudflare\/vite-plugin/);
+  });
+});
+
 // ─── ensureESModule ──────────────────────────────────────────────────────────
 
 describe("ensureESModule", () => {
@@ -940,7 +1130,11 @@ describe("renameCJSConfigs", () => {
   });
 
   it("renames tailwind.config.js using require() to .cjs", () => {
-    writeFile(tmpDir, "tailwind.config.js", `const plugin = require("tailwindcss/plugin");\nmodule.exports = {};`);
+    writeFile(
+      tmpDir,
+      "tailwind.config.js",
+      `const plugin = require("tailwindcss/plugin");\nmodule.exports = {};`,
+    );
 
     const renamed = renameCJSConfigs(tmpDir);
     expect(renamed).toEqual([["tailwind.config.js", "tailwind.config.cjs"]]);
@@ -977,7 +1171,11 @@ describe("renameCJSConfigs", () => {
 describe("detectProject — src/ directory convention", () => {
   it("detects App Router when src/app/ exists", () => {
     mkdir(tmpDir, "src/app");
-    writeFile(tmpDir, "src/app/page.tsx", "export default function Home() { return <div>hi</div> }");
+    writeFile(
+      tmpDir,
+      "src/app/page.tsx",
+      "export default function Home() { return <div>hi</div> }",
+    );
     const info = detectProject(tmpDir);
     expect(info.isAppRouter).toBe(true);
     expect(info.isPagesRouter).toBe(false);
@@ -985,7 +1183,11 @@ describe("detectProject — src/ directory convention", () => {
 
   it("detects Pages Router when only src/pages/ exists", () => {
     mkdir(tmpDir, "src/pages");
-    writeFile(tmpDir, "src/pages/index.tsx", "export default function Home() { return <div>hi</div> }");
+    writeFile(
+      tmpDir,
+      "src/pages/index.tsx",
+      "export default function Home() { return <div>hi</div> }",
+    );
     const info = detectProject(tmpDir);
     expect(info.isAppRouter).toBe(false);
     expect(info.isPagesRouter).toBe(true);
@@ -1035,7 +1237,11 @@ describe("detectProject — src/ directory convention", () => {
 
   it("does not detect ISR when src/app/ has no revalidate exports", () => {
     mkdir(tmpDir, "src/app");
-    writeFile(tmpDir, "src/app/page.tsx", "export default function Home() { return <div>hi</div> }");
+    writeFile(
+      tmpDir,
+      "src/app/page.tsx",
+      "export default function Home() { return <div>hi</div> }",
+    );
     const info = detectProject(tmpDir);
     expect(info.isAppRouter).toBe(true);
     expect(info.hasISR).toBe(false);
@@ -1059,7 +1265,11 @@ describe("detectProject — src/ directory convention", () => {
 
   it("generates correct files for src/app/ project", () => {
     mkdir(tmpDir, "src/app");
-    writeFile(tmpDir, "src/app/page.tsx", "export default function Home() { return <div>hi</div> }");
+    writeFile(
+      tmpDir,
+      "src/app/page.tsx",
+      "export default function Home() { return <div>hi</div> }",
+    );
     const info = detectProject(tmpDir);
     const files = getFilesToGenerate(info);
 
@@ -1076,7 +1286,11 @@ describe("detectProject — src/ directory convention", () => {
 
   it("generates correct files for src/pages/ project", () => {
     mkdir(tmpDir, "src/pages");
-    writeFile(tmpDir, "src/pages/index.tsx", "export default function Home() { return <div>hi</div> }");
+    writeFile(
+      tmpDir,
+      "src/pages/index.tsx",
+      "export default function Home() { return <div>hi</div> }",
+    );
     const info = detectProject(tmpDir);
     const files = getFilesToGenerate(info);
 
@@ -1428,7 +1642,9 @@ describe("Cloudflare closeBundle lazy chunk injection", () => {
         const buildManifest = JSON.parse(fs.readFileSync(buildManifestPath, "utf-8"));
         const lazy = computeLazyChunks(buildManifest);
         if (lazy.length > 0) lazyChunksData = lazy;
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }
 
     // Read SSR manifest
@@ -1437,7 +1653,9 @@ describe("Cloudflare closeBundle lazy chunk injection", () => {
     if (fs.existsSync(ssrManifestPath)) {
       try {
         ssrManifestData = JSON.parse(fs.readFileSync(ssrManifestPath, "utf-8"));
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }
 
     // App Router: inject into dist/server/index.js (NOT __VINEXT_CLIENT_ENTRY__)
@@ -1472,8 +1690,10 @@ describe("Cloudflare closeBundle lazy chunk injection", () => {
     for (const entry of fs.readdirSync(distDir)) {
       const candidate = path.join(distDir, entry);
       if (entry === "client") continue;
-      if (fs.statSync(candidate).isDirectory() &&
-          fs.existsSync(path.join(candidate, "wrangler.json"))) {
+      if (
+        fs.statSync(candidate).isDirectory() &&
+        fs.existsSync(path.join(candidate, "wrangler.json"))
+      ) {
         workerOutDir = candidate;
         break;
       }
@@ -1498,7 +1718,9 @@ describe("Cloudflare closeBundle lazy chunk injection", () => {
         }
         const lazy = computeLazyChunks(buildManifest);
         if (lazy.length > 0) lazyChunksData = lazy;
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }
 
     // Read SSR manifest
@@ -1507,7 +1729,9 @@ describe("Cloudflare closeBundle lazy chunk injection", () => {
     if (fs.existsSync(ssrManifestPath)) {
       try {
         ssrManifestData = JSON.parse(fs.readFileSync(ssrManifestPath, "utf-8"));
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }
 
     // Pages Router: inject all three globals
@@ -1746,10 +1970,7 @@ describe("Cloudflare closeBundle lazy chunk injection", () => {
     // Set up worker dir without wrangler.json
     const workerDir = path.join(tmpDir, "dist", "worker");
     fs.mkdirSync(workerDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(workerDir, "index.js"),
-      "// unmodified",
-    );
+    fs.writeFileSync(path.join(workerDir, "index.js"), "// unmodified");
     fs.mkdirSync(path.join(tmpDir, "dist", "client", ".vite"), { recursive: true });
     fs.writeFileSync(
       path.join(tmpDir, "dist", "client", ".vite", "manifest.json"),
@@ -1814,5 +2035,218 @@ describe("Cloudflare closeBundle lazy chunk injection", () => {
     // Entry and framework are eager
     expect(lazy).not.toContain("assets/entry.js");
     expect(lazy).not.toContain("assets/framework.js");
+  });
+});
+
+// ─── detectPackageManager ────────────────────────────────────────────────────
+
+describe("detectPackageManager", () => {
+  it("detects pnpm from pnpm-lock.yaml", () => {
+    writeFile(tmpDir, "pnpm-lock.yaml", "");
+    expect(detectPackageManager(tmpDir)).toBe("pnpm add -D");
+    expect(detectPackageManagerName(tmpDir)).toBe("pnpm");
+  });
+
+  it("detects yarn from yarn.lock", () => {
+    writeFile(tmpDir, "yarn.lock", "");
+    expect(detectPackageManager(tmpDir)).toBe("yarn add -D");
+    expect(detectPackageManagerName(tmpDir)).toBe("yarn");
+  });
+
+  it("detects bun from bun.lock (text format, Bun v1.0+)", () => {
+    writeFile(tmpDir, "bun.lock", "");
+    expect(detectPackageManager(tmpDir)).toBe("bun add -D");
+    expect(detectPackageManagerName(tmpDir)).toBe("bun");
+  });
+
+  it("detects bun from bun.lockb (legacy binary format)", () => {
+    writeFile(tmpDir, "bun.lockb", "");
+    expect(detectPackageManager(tmpDir)).toBe("bun add -D");
+    expect(detectPackageManagerName(tmpDir)).toBe("bun");
+  });
+
+  it("falls back to npm when no lock file is found", () => {
+    // Clear the user-agent env var so the CI runner's package manager (pnpm)
+    // doesn't leak into the fallback chain.
+    const savedUA = process.env.npm_config_user_agent;
+    delete process.env.npm_config_user_agent;
+    try {
+      expect(detectPackageManager(tmpDir)).toBe("npm install -D");
+      expect(detectPackageManagerName(tmpDir)).toBe("npm");
+    } finally {
+      if (savedUA !== undefined) process.env.npm_config_user_agent = savedUA;
+    }
+  });
+
+  it("walks up to parent directory to find lock file (monorepo root)", () => {
+    writeFile(tmpDir, "bun.lock", "");
+    const appDir = path.join(tmpDir, "apps", "web");
+    fs.mkdirSync(appDir, { recursive: true });
+    writeFile(appDir, "package.json", JSON.stringify({ name: "web" }));
+
+    expect(detectPackageManager(appDir)).toBe("bun add -D");
+    expect(detectPackageManagerName(appDir)).toBe("bun");
+  });
+
+  it("prefers the closest lock file when both child and parent have one", () => {
+    writeFile(tmpDir, "bun.lock", "");
+    const appDir = path.join(tmpDir, "apps", "web");
+    fs.mkdirSync(appDir, { recursive: true });
+    writeFile(appDir, "pnpm-lock.yaml", "");
+
+    expect(detectPackageManager(appDir)).toBe("pnpm add -D");
+    expect(detectPackageManagerName(appDir)).toBe("pnpm");
+  });
+});
+
+// ─── findInNodeModules ───────────────────────────────────────────────────────
+
+describe("findInNodeModules", () => {
+  it("finds a package in the immediate node_modules", () => {
+    mkdir(tmpDir, "node_modules/@cloudflare/vite-plugin");
+    const result = findInNodeModules(tmpDir, "@cloudflare/vite-plugin");
+    expect(result).toBe(path.join(tmpDir, "node_modules", "@cloudflare", "vite-plugin"));
+  });
+
+  it("finds a binary in node_modules/.bin", () => {
+    writeFile(tmpDir, "node_modules/.bin/wrangler", "#!/usr/bin/env node");
+    const result = findInNodeModules(tmpDir, ".bin/wrangler");
+    expect(result).toBe(path.join(tmpDir, "node_modules", ".bin", "wrangler"));
+  });
+
+  it("returns null when not found anywhere", () => {
+    expect(findInNodeModules(tmpDir, ".bin/wrangler")).toBeNull();
+  });
+
+  it("walks up to find package in monorepo root node_modules", () => {
+    writeFile(tmpDir, "node_modules/.bin/wrangler", "#!/usr/bin/env node");
+    const appDir = path.join(tmpDir, "apps", "web-next");
+    fs.mkdirSync(appDir, { recursive: true });
+
+    const result = findInNodeModules(appDir, ".bin/wrangler");
+    expect(result).toBe(path.join(tmpDir, "node_modules", ".bin", "wrangler"));
+  });
+
+  it("prefers the closest node_modules when both app and root have the package", () => {
+    mkdir(tmpDir, "node_modules/@cloudflare/vite-plugin");
+    const appDir = path.join(tmpDir, "apps", "web-next");
+    mkdir(appDir, "node_modules/@cloudflare/vite-plugin");
+
+    const result = findInNodeModules(appDir, "@cloudflare/vite-plugin");
+    expect(result).toBe(path.join(appDir, "node_modules", "@cloudflare", "vite-plugin"));
+  });
+});
+
+// ─── ESM config compatibility (issue #184) ──────────────────────────────────
+//
+// Tests for ensureViteConfigCompatibility() — the wrapper in utils/project.ts
+// that renames CJS configs + adds type:module before Vite loads the config.
+//
+// The underlying ensureESModule() and renameCJSConfigs() are tested above.
+// These tests cover the wrapper's own guards and the integration of both
+// functions together.
+
+describe("ensureViteConfigCompatibility — issue #184", () => {
+  it("renames CJS configs and adds type:module when vite.config.ts exists", () => {
+    writeFile(tmpDir, "package.json", JSON.stringify({ name: "web", version: "1.0.0" }));
+    writeFile(
+      tmpDir,
+      "vite.config.ts",
+      'import { cloudflare } from "@cloudflare/vite-plugin";\nexport default { plugins: [cloudflare()] };',
+    );
+    writeFile(
+      tmpDir,
+      "postcss.config.js",
+      "module.exports = { plugins: { tailwindcss: {}, autoprefixer: {} } };",
+    );
+
+    const result = ensureViteConfigCompatibility(tmpDir);
+
+    expect(result).not.toBeNull();
+    expect(result!.addedTypeModule).toBe(true);
+    expect(result!.renamed).toEqual([["postcss.config.js", "postcss.config.cjs"]]);
+
+    const pkg = JSON.parse(fs.readFileSync(path.join(tmpDir, "package.json"), "utf-8"));
+    expect(pkg.type).toBe("module");
+    expect(fs.existsSync(path.join(tmpDir, "postcss.config.cjs"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "postcss.config.js"))).toBe(false);
+  });
+
+  it("returns null when no vite.config exists", () => {
+    writeFile(tmpDir, "package.json", JSON.stringify({ name: "web", version: "1.0.0" }));
+
+    const result = ensureViteConfigCompatibility(tmpDir);
+    expect(result).toBeNull();
+
+    // package.json should not be modified
+    const pkg = JSON.parse(fs.readFileSync(path.join(tmpDir, "package.json"), "utf-8"));
+    expect(pkg.type).toBeUndefined();
+  });
+
+  it("returns null when package.json already has type:module", () => {
+    writeFile(tmpDir, "package.json", JSON.stringify({ name: "web", type: "module" }));
+    writeFile(tmpDir, "vite.config.ts", "export default {};");
+
+    const result = ensureViteConfigCompatibility(tmpDir);
+    expect(result).toBeNull();
+  });
+
+  it("does not override explicit 'type': 'commonjs'", () => {
+    writeFile(tmpDir, "package.json", JSON.stringify({ name: "web", type: "commonjs" }));
+    writeFile(tmpDir, "vite.config.ts", "export default {};");
+    writeFile(tmpDir, "postcss.config.js", "module.exports = {};");
+
+    const result = ensureViteConfigCompatibility(tmpDir);
+    expect(result).toBeNull();
+
+    // package.json should not be modified
+    const pkg = JSON.parse(fs.readFileSync(path.join(tmpDir, "package.json"), "utf-8"));
+    expect(pkg.type).toBe("commonjs");
+
+    // CJS configs should not be renamed either
+    expect(fs.existsSync(path.join(tmpDir, "postcss.config.js"))).toBe(true);
+  });
+
+  it("returns null when no package.json exists", () => {
+    writeFile(tmpDir, "vite.config.ts", "export default {};");
+
+    const result = ensureViteConfigCompatibility(tmpDir);
+    expect(result).toBeNull();
+  });
+
+  it("detects vite.config.js (not only .ts)", () => {
+    writeFile(tmpDir, "package.json", JSON.stringify({ name: "web", version: "1.0.0" }));
+    writeFile(tmpDir, "vite.config.js", "export default {};");
+
+    const result = ensureViteConfigCompatibility(tmpDir);
+
+    expect(result).not.toBeNull();
+    expect(result!.addedTypeModule).toBe(true);
+
+    const pkg = JSON.parse(fs.readFileSync(path.join(tmpDir, "package.json"), "utf-8"));
+    expect(pkg.type).toBe("module");
+  });
+
+  it("handles a workspaces monorepo: only updates the leaf package.json", () => {
+    const webDir = path.join(tmpDir, "apps", "web");
+    fs.mkdirSync(webDir, { recursive: true });
+
+    // Root package.json (CJS)
+    writeFile(tmpDir, "package.json", JSON.stringify({ name: "monorepo", workspaces: ["apps/*"] }));
+    // Workspace package.json (no type:module)
+    writeFile(webDir, "package.json", JSON.stringify({ name: "web", version: "1.0.0" }));
+    writeFile(webDir, "vite.config.ts", "export default {};");
+
+    const result = ensureViteConfigCompatibility(webDir);
+
+    expect(result).not.toBeNull();
+    expect(result!.addedTypeModule).toBe(true);
+
+    const rootPkg = JSON.parse(fs.readFileSync(path.join(tmpDir, "package.json"), "utf-8"));
+    const webPkg = JSON.parse(fs.readFileSync(path.join(webDir, "package.json"), "utf-8"));
+
+    // Only the workspace package should be modified
+    expect(webPkg.type).toBe("module");
+    expect(rootPkg.type).toBeUndefined();
   });
 });

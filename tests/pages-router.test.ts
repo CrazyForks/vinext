@@ -428,6 +428,23 @@ describe("Pages Router integration", () => {
     expect(text).toContain("Access Denied");
   });
 
+  it("middleware request header overrides can delete credential headers before page handling", async () => {
+    // Ported from Next.js: test/e2e/middleware-request-header-overrides/test/index.test.ts
+    // https://github.com/vercel/next.js/blob/canary/test/e2e/middleware-request-header-overrides/test/index.test.ts
+    const res = await fetch(`${baseUrl}/header-override-delete`, {
+      headers: {
+        authorization: "Bearer secret",
+        cookie: "a=1; b=2",
+      },
+    });
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('id="authorization">null<');
+    expect(html).toContain('id="cookie">null<');
+    expect(html).toContain('id="middleware-header">hello-from-middleware<');
+  });
+
   // --- Hydration ---
 
   it("hydration proxy script is fetchable", async () => {
@@ -525,8 +542,8 @@ describe("Pages Router integration", () => {
   it("blocks page requests with cross-origin Origin header", async () => {
     const res = await fetch(`${baseUrl}/`, {
       headers: {
-        "Origin": "https://evil.com",
-        "Host": new URL(baseUrl).host,
+        Origin: "https://evil.com",
+        Host: new URL(baseUrl).host,
       },
     });
     expect(res.status).toBe(403);
@@ -537,8 +554,8 @@ describe("Pages Router integration", () => {
   it("blocks API requests with cross-origin Origin header", async () => {
     const res = await fetch(`${baseUrl}/api/hello`, {
       headers: {
-        "Origin": "https://external.io",
-        "Host": new URL(baseUrl).host,
+        Origin: "https://external.io",
+        Host: new URL(baseUrl).host,
       },
     });
     expect(res.status).toBe(403);
@@ -550,16 +567,19 @@ describe("Pages Router integration", () => {
     const http = await import("node:http");
     const url = new URL(baseUrl);
     const status = await new Promise<number>((resolve, reject) => {
-      const req = http.request({
-        hostname: url.hostname,
-        port: url.port,
-        path: "/",
-        method: "GET",
-        headers: {
-          "sec-fetch-site": "cross-site",
-          "sec-fetch-mode": "no-cors",
+      const req = http.request(
+        {
+          hostname: url.hostname,
+          port: url.port,
+          path: "/",
+          method: "GET",
+          headers: {
+            "sec-fetch-site": "cross-site",
+            "sec-fetch-mode": "no-cors",
+          },
         },
-      }, (res) => resolve(res.statusCode ?? 0));
+        (res) => resolve(res.statusCode ?? 0),
+      );
       req.on("error", reject);
       req.end();
     });
@@ -569,8 +589,8 @@ describe("Pages Router integration", () => {
   it("allows page requests from localhost origin", async () => {
     const res = await fetch(`${baseUrl}/`, {
       headers: {
-        "Origin": baseUrl,
-        "Host": new URL(baseUrl).host,
+        Origin: baseUrl,
+        Host: new URL(baseUrl).host,
       },
     });
     expect(res.status).toBe(200);
@@ -656,10 +676,67 @@ describe("Pages Router dev server origin check", () => {
   });
 
   it("blocks image endpoint redirect to /node_modules paths", async () => {
-    const res = await fetch(`${baseUrl}/_vinext/image?url=/node_modules/.vite/manifest.json&w=100&q=75`, {
-      redirect: "manual",
-    });
+    const res = await fetch(
+      `${baseUrl}/_vinext/image?url=/node_modules/.vite/manifest.json&w=100&q=75`,
+      {
+        redirect: "manual",
+      },
+    );
     expect(res.status).toBe(400);
+  });
+});
+
+// Ported from Next.js: test/development/basic/allowed-dev-origins.test.ts
+// https://github.com/vercel/next.js/blob/canary/test/development/basic/allowed-dev-origins.test.ts
+describe("Pages Router allowedDevOrigins config", () => {
+  let server: ViteDevServer;
+  let baseUrl: string;
+  let tmpDir: string;
+
+  beforeAll(async () => {
+    tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "vinext-pages-allowed-dev-origins-"));
+    await fsp.mkdir(path.join(tmpDir, "pages"), { recursive: true });
+    await fsp.symlink(
+      path.resolve(import.meta.dirname, "../node_modules"),
+      path.join(tmpDir, "node_modules"),
+      "junction",
+    );
+    await fsp.writeFile(
+      path.join(tmpDir, "pages", "index.tsx"),
+      `export default function Home() { return <div>allowed-dev-origins-pages</div>; }`,
+    );
+    await fsp.writeFile(
+      path.join(tmpDir, "next.config.mjs"),
+      `export default {
+  allowedDevOrigins: ["allowed.example.com"],
+  experimental: {
+    serverActions: {
+      allowedOrigins: ["actions.example.com"],
+    },
+  },
+};
+`,
+    );
+    ({ server, baseUrl } = await startFixtureServer(tmpDir));
+  }, 30000);
+
+  afterAll(async () => {
+    await server?.close();
+    await fsp.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("allows cross-origin requests from allowedDevOrigins", async () => {
+    const res = await fetch(`${baseUrl}/`, {
+      headers: { Origin: "http://allowed.example.com" },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("does not treat serverActions.allowedOrigins as allowedDevOrigins", async () => {
+    const res = await fetch(`${baseUrl}/`, {
+      headers: { Origin: "http://actions.example.com" },
+    });
+    expect(res.status).toBe(403);
   });
 });
 
@@ -704,7 +781,7 @@ describe("Virtual server entry generation", () => {
       expect(resolved).toBeTruthy();
       const loaded = await testServer.pluginContainer.load(resolved!.id);
       expect(loaded).toBeTruthy();
-      const code = typeof loaded === "string" ? loaded : (loaded as any)?.code ?? "";
+      const code = typeof loaded === "string" ? loaded : ((loaded as any)?.code ?? "");
 
       // Dynamic routes should use [param] format, not :param
       // The fixture has pages/posts/[id].tsx
@@ -820,6 +897,58 @@ describe("Plugin config", () => {
     // Proxy should be inert when no MDX files are detected (mdxDelegate is null)
     expect(mdxProxy.config({}, { command: "build", mode: "production" })).toBeUndefined();
     expect(mdxProxy.transform("code", "./foo.ts", {})).toBeUndefined();
+  });
+
+  it("vinext:mdx transform skips ids that contain a query string (regression: ?raw)", () => {
+    // @mdx-js/rollup strips the query before matching the file extension, so
+    // it would compile "foo.mdx?raw" as MDX and return compiled JSX instead of
+    // raw text. The proxy must short-circuit on any id that contains "?".
+    const plugins = vinext() as any[];
+    const mdxProxy = plugins.find((p: any) => p.name === "vinext:mdx");
+
+    // Common query-param import patterns that must be skipped
+    expect(mdxProxy.transform("# hello", "/app/content.mdx?raw", {})).toBeUndefined();
+    expect(mdxProxy.transform("# hello", "/app/page.mdx?url", {})).toBeUndefined();
+    expect(mdxProxy.transform("# hello", "/app/page.mdx?inline", {})).toBeUndefined();
+  });
+
+  it("vinext:mdx proxy logic — ?raw guard prevents delegate from compiling query imports", () => {
+    // Self-contained unit test that exercises the guard independently of whether
+    // mdxDelegate is set. Without the guard, @mdx-js/rollup silently compiles
+    // ?raw imports into JSX; with it, the proxy returns undefined (pass-through).
+    const mockTransformResult = { code: "/* compiled mdx */", map: null };
+    const mockDelegate = {
+      transform: vi.fn().mockReturnValue(mockTransformResult),
+    };
+
+    // Proxy WITHOUT the query guard — reproduces the bug
+    function transformWithoutGuard(code: string, id: string) {
+      if (!mockDelegate.transform) return;
+      return (mockDelegate.transform as any).call({}, code, id, {});
+    }
+
+    // Proxy WITH the query guard — the fix
+    function transformWithGuard(code: string, id: string) {
+      // Skip ?raw and other query imports — @mdx-js/rollup ignores the query
+      // and would compile the file as MDX instead of returning raw text.
+      if (id.includes("?")) return;
+      if (!mockDelegate.transform) return;
+      return (mockDelegate.transform as any).call({}, code, id, {});
+    }
+
+    // Without the guard: ?raw import is incorrectly handed to the MDX compiler
+    expect(transformWithoutGuard("", "/app/content.mdx?raw")).toEqual(mockTransformResult);
+    expect(mockDelegate.transform).toHaveBeenCalledWith("", "/app/content.mdx?raw", {});
+
+    mockDelegate.transform.mockClear();
+
+    // With the guard: ?raw import is skipped (undefined = Vite pass-through)
+    expect(transformWithGuard("", "/app/content.mdx?raw")).toBeUndefined();
+    expect(mockDelegate.transform).not.toHaveBeenCalled();
+
+    // Plain .mdx (no query) still goes through the delegate
+    expect(transformWithGuard("", "/app/content.mdx")).toEqual(mockTransformResult);
+    expect(mockDelegate.transform).toHaveBeenCalledWith("", "/app/content.mdx", {});
   });
 });
 
@@ -1109,7 +1238,9 @@ export const config = { matcher: ["/protected"] };
       // Pipe Web Response back to Node.js res
       const body = await response.text();
       const resHeaders: Record<string, string> = {};
-      response.headers.forEach((v: string, k: string) => { resHeaders[k] = v; });
+      response.headers.forEach((v: string, k: string) => {
+        resHeaders[k] = v;
+      });
       res.writeHead(response.status, resHeaders);
       res.end(body);
     });
@@ -1179,6 +1310,25 @@ export const config = { matcher: ["/protected"] };
     expect(result.redirectStatus).toBe(307);
   });
 
+  it("runMiddleware preserves responseHeaders on redirect (/redirect-with-cookies)", async () => {
+    const serverEntryPath = path.join(outDir, "server", "entry.js");
+    const serverEntry = await import(pathToFileURL(serverEntryPath).href);
+    const request = new Request("http://localhost/redirect-with-cookies");
+    const result = await serverEntry.runMiddleware(request);
+    expect(result.continue).toBe(false);
+    expect(result.redirectUrl).toContain("/about");
+    expect(result.redirectStatus).toBe(307);
+    // The inline runMiddleware codegen must collect non-internal headers
+    // (e.g. Set-Cookie) on redirect responses, just like it does for
+    // next() and rewrite() responses.
+    expect(result.responseHeaders).toBeDefined();
+    const cookies = [...result.responseHeaders.entries()]
+      .filter(([k]: [string, string]) => k === "set-cookie")
+      .map(([, v]: [string, string]) => v);
+    expect(cookies.some((c: string) => c.includes("mw-session=abc123"))).toBe(true);
+    expect(cookies.some((c: string) => c.includes("mw-theme=dark"))).toBe(true);
+  });
+
   it("runMiddleware handles rewrite (/rewritten -> /ssr)", async () => {
     const serverEntryPath = path.join(outDir, "server", "entry.js");
     const serverEntry = await import(pathToFileURL(serverEntryPath).href);
@@ -1220,7 +1370,9 @@ export const config = { matcher: ["/protected"] };
     expect(result.continue).toBe(true);
     expect(result.responseHeaders).toBeDefined();
     // x-middleware-request-* headers must be preserved (the fix)
-    expect(result.responseHeaders.get("x-middleware-request-x-custom-injected")).toBe("from-middleware");
+    expect(result.responseHeaders.get("x-middleware-request-x-custom-injected")).toBe(
+      "from-middleware",
+    );
     // Other x-middleware-* internal headers must be stripped
     expect(result.responseHeaders.get("x-middleware-next")).toBeNull();
   });
@@ -1272,9 +1424,7 @@ describe("Production server middleware (Pages Router)", () => {
       });
     }
 
-    const { startProdServer } = await import(
-      "../packages/vinext/src/server/prod-server.js"
-    );
+    const { startProdServer } = await import("../packages/vinext/src/server/prod-server.js");
     prodServer = await startProdServer({
       port: 0,
       host: "127.0.0.1",
@@ -1294,6 +1444,19 @@ describe("Production server middleware (Pages Router)", () => {
     const res = await fetch(`${prodUrl}/old-page`, { redirect: "manual" });
     expect(res.status).toBe(307);
     expect(res.headers.get("location")).toContain("/about");
+  });
+
+  it("preserves Set-Cookie headers on middleware redirect", async () => {
+    const res = await fetch(`${prodUrl}/redirect-with-cookies`, {
+      redirect: "manual",
+    });
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toContain("/about");
+    // Middleware sets mw-session and mw-theme cookies on this redirect.
+    // These must survive into the production response — not be dropped.
+    const cookies = res.headers.getSetCookie();
+    expect(cookies.some((c: string) => c.includes("mw-session=abc123"))).toBe(true);
+    expect(cookies.some((c: string) => c.includes("mw-theme=dark"))).toBe(true);
   });
 
   it("rewrites /rewritten to render /ssr content", async () => {
@@ -1320,6 +1483,21 @@ describe("Production server middleware (Pages Router)", () => {
     const res = await fetch(`${prodUrl}/about`);
     expect(res.status).toBe(200);
     expect(res.headers.get("x-custom-middleware")).toBe("active");
+  });
+
+  it("middleware request header overrides can delete credential headers before page handling", async () => {
+    const res = await fetch(`${prodUrl}/header-override-delete`, {
+      headers: {
+        authorization: "Bearer secret",
+        cookie: "a=1; b=2",
+      },
+    });
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('id="authorization">null<');
+    expect(html).toContain('id="cookie">null<');
+    expect(html).toContain('id="middleware-header">hello-from-middleware<');
   });
 
   it("does not run middleware on /api routes", async () => {
@@ -1422,9 +1600,7 @@ describe("Production server next.config.js features (Pages Router)", () => {
       });
     }
 
-    const { startProdServer } = await import(
-      "../packages/vinext/src/server/prod-server.js"
-    );
+    const { startProdServer } = await import("../packages/vinext/src/server/prod-server.js");
     prodServer = await startProdServer({
       port: 0,
       host: "127.0.0.1",
@@ -1605,15 +1781,10 @@ describe("Static export (Pages Router)", () => {
   });
 
   it("exports static pages to HTML files", async () => {
-    const { staticExportPages } = await import(
-      "../packages/vinext/src/build/static-export.js"
-    );
-    const { pagesRouter, apiRouter } = await import(
-      "../packages/vinext/src/routing/pages-router.js"
-    );
-    const { resolveNextConfig } = await import(
-      "../packages/vinext/src/config/next-config.js"
-    );
+    const { staticExportPages } = await import("../packages/vinext/src/build/static-export.js");
+    const { pagesRouter, apiRouter } =
+      await import("../packages/vinext/src/routing/pages-router.js");
+    const { resolveNextConfig } = await import("../packages/vinext/src/config/next-config.js");
 
     const pagesDir = path.resolve(FIXTURE_DIR, "pages");
     const routes = await pagesRouter(pagesDir);
@@ -1634,69 +1805,47 @@ describe("Static export (Pages Router)", () => {
 
     // Index page
     expect(result.files).toContain("index.html");
-    const indexHtml = fs.readFileSync(
-      path.join(exportDir, "index.html"),
-      "utf-8",
-    );
+    const indexHtml = fs.readFileSync(path.join(exportDir, "index.html"), "utf-8");
     expect(indexHtml).toContain("<!DOCTYPE html>");
     expect(indexHtml).toContain("Hello, vinext!");
 
     // About page
     expect(result.files).toContain("about.html");
-    const aboutHtml = fs.readFileSync(
-      path.join(exportDir, "about.html"),
-      "utf-8",
-    );
+    const aboutHtml = fs.readFileSync(path.join(exportDir, "about.html"), "utf-8");
     expect(aboutHtml).toContain("About");
   });
 
   it("pre-renders dynamic routes from getStaticPaths", async () => {
     // blog/[slug] has getStaticPaths returning hello-world and getting-started
-    expect(
-      fs.existsSync(path.join(exportDir, "blog", "hello-world.html")),
-    ).toBe(true);
-    expect(
-      fs.existsSync(path.join(exportDir, "blog", "getting-started.html")),
-    ).toBe(true);
+    expect(fs.existsSync(path.join(exportDir, "blog", "hello-world.html"))).toBe(true);
+    expect(fs.existsSync(path.join(exportDir, "blog", "getting-started.html"))).toBe(true);
 
-    const blogHtml = fs.readFileSync(
-      path.join(exportDir, "blog", "hello-world.html"),
-      "utf-8",
-    );
+    const blogHtml = fs.readFileSync(path.join(exportDir, "blog", "hello-world.html"), "utf-8");
     expect(blogHtml).toContain("Hello World");
     expect(blogHtml).toContain("hello-world");
   });
 
   it("generates 404.html", async () => {
     expect(fs.existsSync(path.join(exportDir, "404.html"))).toBe(true);
-    const html404 = fs.readFileSync(
-      path.join(exportDir, "404.html"),
-      "utf-8",
-    );
+    const html404 = fs.readFileSync(path.join(exportDir, "404.html"), "utf-8");
     expect(html404).toContain("404");
-	});
+  });
 
   it("escapes meta refresh URL to prevent HTML injection", async () => {
     expect(fs.existsSync(path.join(exportDir, "redirect-xss.html"))).toBe(true);
-    const html = fs.readFileSync(
-      path.join(exportDir, "redirect-xss.html"),
-      "utf-8",
+    const html = fs.readFileSync(path.join(exportDir, "redirect-xss.html"), "utf-8");
+    expect(html).toContain(
+      'content="0;url=foo&quot; /&gt;&lt;script&gt;alert(1)&lt;/script&gt;&lt;meta x=&quot;"',
     );
-    expect(html).toContain('content="0;url=foo&quot; /&gt;&lt;script&gt;alert(1)&lt;/script&gt;&lt;meta x=&quot;"');
-    expect(html).not.toContain('<script>alert(1)</script>');
+    expect(html).not.toContain("<script>alert(1)</script>");
   });
 
   it("reports errors for pages using getServerSideProps", async () => {
     // The result from the first test should have errors for SSR-only pages
-    const { staticExportPages } = await import(
-      "../packages/vinext/src/build/static-export.js"
-    );
-    const { pagesRouter, apiRouter } = await import(
-      "../packages/vinext/src/routing/pages-router.js"
-    );
-    const { resolveNextConfig } = await import(
-      "../packages/vinext/src/config/next-config.js"
-    );
+    const { staticExportPages } = await import("../packages/vinext/src/build/static-export.js");
+    const { pagesRouter, apiRouter } =
+      await import("../packages/vinext/src/routing/pages-router.js");
+    const { resolveNextConfig } = await import("../packages/vinext/src/config/next-config.js");
 
     const pagesDir = path.resolve(FIXTURE_DIR, "pages");
     const routes = await pagesRouter(pagesDir);
@@ -1715,9 +1864,7 @@ describe("Static export (Pages Router)", () => {
       });
 
       // Should report errors for getServerSideProps pages
-      const ssrErrors = result.errors.filter((e) =>
-        e.error.includes("getServerSideProps"),
-      );
+      const ssrErrors = result.errors.filter((e) => e.error.includes("getServerSideProps"));
       expect(ssrErrors.length).toBeGreaterThan(0);
 
       // Should warn about API routes
@@ -1768,23 +1915,15 @@ describe("Static export (Pages Router)", () => {
   });
 
   it("includes __NEXT_DATA__ in exported HTML", async () => {
-    const indexHtml = fs.readFileSync(
-      path.join(exportDir, "index.html"),
-      "utf-8",
-    );
+    const indexHtml = fs.readFileSync(path.join(exportDir, "index.html"), "utf-8");
     expect(indexHtml).toContain("__NEXT_DATA__");
   });
 
   it("respects trailingSlash config", async () => {
-    const { staticExportPages } = await import(
-      "../packages/vinext/src/build/static-export.js"
-    );
-    const { pagesRouter, apiRouter } = await import(
-      "../packages/vinext/src/routing/pages-router.js"
-    );
-    const { resolveNextConfig } = await import(
-      "../packages/vinext/src/config/next-config.js"
-    );
+    const { staticExportPages } = await import("../packages/vinext/src/build/static-export.js");
+    const { pagesRouter, apiRouter } =
+      await import("../packages/vinext/src/routing/pages-router.js");
+    const { resolveNextConfig } = await import("../packages/vinext/src/config/next-config.js");
 
     const pagesDir = path.resolve(FIXTURE_DIR, "pages");
     const routes = await pagesRouter(pagesDir);
@@ -1807,9 +1946,7 @@ describe("Static export (Pages Router)", () => {
 
       // With trailingSlash, about → about/index.html
       expect(result.files).toContain("about/index.html");
-      expect(
-        fs.existsSync(path.join(trailingDir, "about", "index.html")),
-      ).toBe(true);
+      expect(fs.existsSync(path.join(trailingDir, "about", "index.html"))).toBe(true);
     } finally {
       fs.rmSync(trailingDir, { recursive: true, force: true });
     }

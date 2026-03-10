@@ -13,6 +13,14 @@ export function middleware(request: NextRequest) {
     return NextResponse.redirect(new URL("/about", request.url));
   }
 
+  // Redirect /redirect-with-cookies to /about and set cookies on the redirect
+  if (url.pathname === "/redirect-with-cookies") {
+    const res = NextResponse.redirect(new URL("/about", request.url));
+    res.cookies.set("mw-session", "abc123", { path: "/" });
+    res.cookies.set("mw-theme", "dark", { path: "/" });
+    return res;
+  }
+
   // Rewrite /rewritten to /ssr
   if (url.pathname === "/rewritten") {
     return NextResponse.rewrite(new URL("/ssr", request.url));
@@ -33,6 +41,14 @@ export function middleware(request: NextRequest) {
   if (url.pathname === "/header-override") {
     const headers = new Headers(request.headers);
     headers.set("x-custom-injected", "from-middleware");
+    return NextResponse.next({ request: { headers } });
+  }
+
+  if (url.pathname === "/header-override-delete") {
+    const headers = new Headers(request.headers);
+    headers.delete("authorization");
+    headers.delete("cookie");
+    headers.set("x-from-middleware", "hello-from-middleware");
     return NextResponse.next({ request: { headers } });
   }
 
