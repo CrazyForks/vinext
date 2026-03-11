@@ -29,6 +29,7 @@ import {
 } from "../config/next-config.js";
 import { pagesRouter, apiRouter } from "../routing/pages-router.js";
 import { appRouter } from "../routing/app-router.js";
+import { classifyPagesRoute, type RouteType } from "./report.js";
 import { safeJsonStringify } from "../server/html.js";
 import { escapeAttr } from "../shims/head.js";
 import path from "node:path";
@@ -109,6 +110,13 @@ export interface StaticExportResult {
   warnings: string[];
   /** Errors encountered (non-fatal, specific pages) */
   errors: Array<{ route: string; error: string }>;
+  /**
+   * Confirmed route classifications keyed by URL pattern.
+   * Populated from runtime data (module execution, getStaticPaths, etc.) —
+   * more accurate than the regex-based analysis in report.ts.
+   * Consumed by printBuildReport() to show correct route types.
+   */
+  routeClassifications: Map<string, { type: RouteType; revalidate?: number }>;
 }
 
 /**
@@ -124,6 +132,7 @@ export async function staticExportPages(options: StaticExportOptions): Promise<S
     files: [],
     warnings: [],
     errors: [],
+    routeClassifications: new Map(),
   };
 
   // Ensure output directory exists
@@ -134,6 +143,9 @@ export async function staticExportPages(options: StaticExportOptions): Promise<S
     result.warnings.push(
       `${apiRoutes.length} API route(s) skipped — API routes are not supported with output: 'export'`,
     );
+    for (const r of apiRoutes) {
+      result.routeClassifications.set(r.pattern, { type: "api" });
+    }
   }
 
   // Gather all pages to render (expand dynamic routes via getStaticPaths)
@@ -152,6 +164,7 @@ export async function staticExportPages(options: StaticExportOptions): Promise<S
 
     // Validate: getServerSideProps is not allowed with static export
     if (typeof pageModule.getServerSideProps === "function") {
+      result.routeClassifications.set(route.pattern, { type: "ssr" });
       result.errors.push({
         route: route.pattern,
         error: `Page uses getServerSideProps which is not supported with output: 'export'. Use getStaticProps instead.`,
@@ -162,6 +175,7 @@ export async function staticExportPages(options: StaticExportOptions): Promise<S
     if (route.isDynamic) {
       // Dynamic route — needs getStaticPaths to enumerate params
       if (typeof pageModule.getStaticPaths !== "function") {
+        result.routeClassifications.set(route.pattern, { type: "ssr" });
         result.warnings.push(
           `Dynamic route ${route.pattern} has no getStaticPaths() — skipping (no pages generated)`,
         );
@@ -175,6 +189,7 @@ export async function staticExportPages(options: StaticExportOptions): Promise<S
       const fallback = pathsResult?.fallback ?? false;
 
       if (fallback !== false) {
+        result.routeClassifications.set(route.pattern, { type: "ssr" });
         result.errors.push({
           route: route.pattern,
           error: `getStaticPaths must return fallback: false with output: 'export' (got: ${JSON.stringify(fallback)})`,
@@ -192,6 +207,17 @@ export async function staticExportPages(options: StaticExportOptions): Promise<S
     } else {
       // Static route — render directly
       pagesToRender.push({ route, urlPath: route.pattern, params: {} });
+    }
+  }
+
+  // Classify all routes queued for rendering using source analysis.
+  // We have the actual file paths here, so classifyPagesRoute gives us ISR
+  // revalidate values and static/ssr distinctions that the regex in
+  // collectStaticRoutesFromSource loses. Each pattern is only classified once
+  // even if it expands to multiple concrete URLs via getStaticPaths.
+  for (const { route } of pagesToRender) {
+    if (!result.routeClassifications.has(route.pattern)) {
+      result.routeClassifications.set(route.pattern, classifyPagesRoute(route.filePath));
     }
   }
 
@@ -740,6 +766,7 @@ export async function staticExportApp(
     files: [],
     warnings: [],
     errors: [],
+    routeClassifications: new Map(),
   };
 
   fs.mkdirSync(outDir, { recursive: true });
@@ -750,6 +777,7 @@ export async function staticExportApp(
   for (const route of routes) {
     // Skip API route handlers — not supported in static export
     if (route.routePath && !route.pagePath) {
+      result.routeClassifications.set(route.pattern, { type: "api" });
       result.warnings.push(
         `Route handler ${route.pattern} skipped — API routes are not supported with output: 'export'`,
       );
@@ -764,6 +792,7 @@ export async function staticExportApp(
         const pageModule = await server.ssrLoadModule(route.pagePath);
 
         if (typeof pageModule.generateStaticParams !== "function") {
+          result.routeClassifications.set(route.pattern, { type: "ssr" });
           result.warnings.push(
             `Dynamic route ${route.pattern} has no generateStaticParams() — skipping (no pages generated)`,
           );
@@ -778,12 +807,20 @@ export async function staticExportApp(
         );
 
         if (expandedUrls.length === 0) {
+          result.routeClassifications.set(route.pattern, { type: "ssr" });
           result.warnings.push(
             `generateStaticParams() for ${route.pattern} returned empty array — no pages generated`,
           );
           continue;
         }
 
+        // Has generateStaticParams — statically pre-rendered at build time.
+        // Use classifyAppRoute to pick up any explicit revalidate config.
+        const { classifyAppRoute } = await import("./report.js");
+        result.routeClassifications.set(
+          route.pattern,
+          classifyAppRoute(route.pagePath, route.routePath, route.isDynamic),
+        );
         urlsToRender.push(...expandedUrls);
       } catch (e) {
         result.errors.push({
@@ -792,7 +829,12 @@ export async function staticExportApp(
         });
       }
     } else {
-      // Static route
+      // Static route — classify and queue for rendering
+      const { classifyAppRoute } = await import("./report.js");
+      result.routeClassifications.set(
+        route.pattern,
+        classifyAppRoute(route.pagePath, route.routePath, route.isDynamic),
+      );
       urlsToRender.push(route.pattern);
     }
   }
@@ -924,6 +966,7 @@ export async function runStaticExport(
       files: [],
       warnings: ["No app/ or pages/ directory found — nothing to export"],
       errors: [],
+      routeClassifications: new Map(),
     };
   }
 
@@ -999,6 +1042,11 @@ export async function runStaticExport(
         ],
         warnings: [...appResult.warnings, ...pagesResult.warnings, ...collisionWarnings],
         errors: [...appResult.errors, ...pagesResult.errors],
+        routeClassifications: new Map([
+          ...appResult.routeClassifications,
+          // Pages Router wins on collision (same pattern in both routers)
+          ...pagesResult.routeClassifications,
+        ]),
       };
     } else {
       // Pages Router only
@@ -1034,6 +1082,8 @@ export interface PrerenderResult {
   files: string[];
   warnings: string[];
   skipped: string[];
+  /** Route pattern → runtime-confirmed classification. Primary source for printBuildReport. */
+  routeClassifications: Map<string, { type: RouteType; revalidate?: number }>;
 }
 
 /**
@@ -1065,6 +1115,7 @@ export async function prerenderStaticPages(options: PrerenderOptions): Promise<P
     files: [],
     warnings: [],
     skipped: [],
+    routeClassifications: new Map(),
   };
 
   // Bail if dist/ doesn't exist
@@ -1098,6 +1149,11 @@ export async function prerenderStaticPages(options: PrerenderOptions): Promise<P
   // getStaticPaths execution to enumerate param values.
   const collected = await collectStaticRoutesFromSource(root);
   result.skipped.push(...collected.skipped);
+  // Seed routeClassifications with all classifications from source inspection.
+  // Successfully pre-rendered routes will be upgraded to "static" below.
+  for (const [pattern, cls] of collected.routeClassifications) {
+    result.routeClassifications.set(pattern, cls);
+  }
 
   if (collected.urls.length === 0) {
     result.warnings.push("No static routes found — nothing to pre-render");
@@ -1153,6 +1209,8 @@ export async function prerenderStaticPages(options: PrerenderOptions): Promise<P
 
         result.files.push(outputPath);
         result.pageCount++;
+        // Runtime-confirmed static: the page was successfully fetched and written.
+        result.routeClassifications.set(urlPath, { type: "static" });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         result.skipped.push(`${urlPath} (error: ${msg})`);
@@ -1184,42 +1242,12 @@ export async function prerenderStaticPages(options: PrerenderOptions): Promise<P
 async function collectStaticRoutesFromSource(root: string): Promise<CollectedRoutes> {
   const pagesDirCandidates = [path.join(root, "pages"), path.join(root, "src", "pages")];
   const pagesDir = pagesDirCandidates.find((d) => fs.existsSync(d));
-  if (!pagesDir) return { urls: [], skipped: [] };
+  if (!pagesDir) return { urls: [], skipped: [], routeClassifications: new Map() };
 
   const routes = await pagesRouter(pagesDir);
   const urls: string[] = [];
   const skipped: string[] = [];
-
-  // Patterns that indicate a page should not be pre-rendered as fully static.
-  // Intentionally broad (may match comments/strings) — false positives only
-  // cause a static page to be skipped, which is safe. False negatives would
-  // cause a broken or over-cached pre-render.
-  //
-  // getServerSideProps: page is server-rendered on every request — skip.
-  const gsspPattern =
-    /export\s+(async\s+)?function\s+getServerSideProps|export\s+(const|let|var)\s+getServerSideProps/;
-  // Re-exported getServerSideProps: `export { getServerSideProps } from ...`
-  const gsspReExportPattern = /export\s*\{[^}]*\bgetServerSideProps\b[^}]*\}/;
-  // Re-exported getStaticProps: `export { getStaticProps } from './data-layer'`
-  // We cannot inspect the re-exported function to determine whether it returns
-  // `revalidate`, so conservatively skip these pages to avoid pinning ISR pages
-  // with a year-long Cache-Control. False positive: valid static pages that
-  // happen to re-export getStaticProps without revalidate will be skipped (safe).
-  const gspReExportPattern = /export\s*\{[^}]*\bgetStaticProps\b[^}]*\}/;
-  // ISR: getStaticProps returning { revalidate } means the page needs
-  // periodic regeneration. Pre-rendering it with s-maxage=31536000 would
-  // pin the CDN cache for a year regardless of the revalidate interval.
-  // Detect `revalidate:` (object key), `revalidate,` / `revalidate}` (shorthand
-  // property in destructuring or object literal), and `revalidate` at end-of-line.
-  // The [\s,}] trailer catches shorthand syntax like `return { revalidate }` or
-  // `const { revalidate } = ...` where there is no colon.
-  // Known false positives (page skipped safely): TypeScript type annotations
-  // (`type T = { revalidate: number }`), interface definitions, comments.
-  // Known false negatives (page pre-rendered with wrong cache): variable-based
-  // revalidate where getStaticProps is re-exported from another module (covered
-  // above by gspReExportPattern) — inline `const HOUR = 3600; return { revalidate: HOUR }`
-  // does match via `revalidate:` so is correctly detected.
-  const isrPattern = /\brevalidate\s*[:\s,}]/;
+  const routeClassifications: Map<string, { type: RouteType; revalidate?: number }> = new Map();
 
   for (const route of routes) {
     const routeName = path.basename(route.filePath, path.extname(route.filePath));
@@ -1227,24 +1255,26 @@ async function collectStaticRoutesFromSource(root: string): Promise<CollectedRou
 
     if (route.isDynamic) {
       skipped.push(`${route.pattern} (dynamic)`);
+      routeClassifications.set(route.pattern, { type: "ssr" });
       continue;
     }
 
     try {
-      const source = fs.readFileSync(route.filePath, "utf-8");
+      // Use classifyPagesRoute as the single source of truth — it already
+      // detects getServerSideProps (→ ssr), getStaticProps+revalidate (→ isr),
+      // re-exported getStaticProps (→ isr, conservative), and plain static pages.
+      const classification = classifyPagesRoute(route.filePath);
+      routeClassifications.set(route.pattern, classification);
 
-      if (gsspPattern.test(source) || gsspReExportPattern.test(source)) {
+      if (classification.type === "ssr") {
         skipped.push(`${route.pattern} (getServerSideProps)`);
         continue;
       }
 
-      if (gspReExportPattern.test(source)) {
-        skipped.push(`${route.pattern} (re-exported getStaticProps — may include revalidate)`);
-        continue;
-      }
-
-      if (isrPattern.test(source)) {
-        skipped.push(`${route.pattern} (ISR — getStaticProps with revalidate)`);
+      if (classification.type === "isr") {
+        skipped.push(
+          `${route.pattern} (ISR — getStaticProps with revalidate${classification.revalidate != null ? `=${classification.revalidate}` : ""})`,
+        );
         continue;
       }
 
@@ -1254,10 +1284,11 @@ async function collectStaticRoutesFromSource(root: string): Promise<CollectedRou
     }
   }
 
-  return { urls, skipped };
+  return { urls, skipped, routeClassifications };
 }
 
 interface CollectedRoutes {
   urls: string[];
   skipped: string[];
+  routeClassifications: Map<string, { type: RouteType; revalidate?: number }>;
 }
