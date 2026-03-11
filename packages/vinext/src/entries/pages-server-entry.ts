@@ -17,6 +17,7 @@ import {
   generateSafeRegExpCode,
   generateMiddlewareMatcherCode,
   generateNormalizePathCode,
+  generateRouteMatchNormalizationCode,
 } from "../server/middleware-codegen.js";
 import { findFileWithExts } from "./pages-entry-helpers.js";
 
@@ -24,6 +25,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const _requestContextShimPath = fileURLToPath(
   new URL("../shims/request-context.js", import.meta.url),
 ).replace(/\\/g, "/");
+const _routeTriePath = fileURLToPath(new URL("../routing/route-trie.js", import.meta.url)).replace(
+  /\\/g,
+  "/",
+);
 
 /**
  * Generate the virtual SSR server entry module.
@@ -145,6 +150,7 @@ import { NextRequest, NextFetchEvent } from "next/server";`
     ? `
 // --- Middleware support (generated from middleware-codegen.ts) ---
 ${generateNormalizePathCode("es5")}
+${generateRouteMatchNormalizationCode("es5")}
 ${generateSafeRegExpCode("es5")}
 ${generateMiddlewareMatcherCode("es5")}
 
@@ -171,7 +177,7 @@ async function _runMiddleware(request) {
   // Normalize pathname before matching to prevent path-confusion bypasses
   // (percent-encoding like /%61dmin, double slashes like /dashboard//settings).
   var decodedPathname;
-  try { decodedPathname = decodeURIComponent(url.pathname); } catch (e) {
+  try { decodedPathname = __normalizePathnameForRouteMatchStrict(url.pathname); } catch (e) {
     return { continue: false, response: new Response("Bad Request", { status: 400 }) };
   }
   var normalizedPathname = __normalizePath(decodedPathname);
@@ -264,6 +270,7 @@ import { getSSRFontLinks as _getSSRFontLinks, getSSRFontStyles as _getSSRFontSty
 import { getSSRFontStyles as _getSSRFontStylesLocal, getSSRFontPreloads as _getSSRFontPreloadsLocal } from "next/font/local";
 import { parseCookies } from ${JSON.stringify(path.resolve(__dirname, "../config/config-matchers.js").replace(/\\/g, "/"))};
 import { runWithExecutionContext as _runWithExecutionContext, getRequestExecutionContext as _getRequestExecutionContext } from ${JSON.stringify(_requestContextShimPath)};
+import { buildRouteTrie as _buildRouteTrie, trieMatch as _trieMatch } from ${JSON.stringify(_routeTriePath)};
 ${instrumentationImportCode}
 ${middlewareImportCode}
 
@@ -333,6 +340,16 @@ function isrCacheKey(router, pathname) {
   return prefix + ":__hash:" + fnv1a64(normalized);
 }
 
+function getMediaType(contentType) {
+  var type = (contentType || "text/plain").split(";")[0];
+  type = type && type.trim().toLowerCase();
+  return type || "text/plain";
+}
+
+function isJsonMediaType(mediaType) {
+  return mediaType === "application/json" || mediaType === "application/ld+json";
+}
+
 async function renderToStringAsync(element) {
   const stream = await renderToReadableStream(element);
   await stream.allReady;
@@ -348,10 +365,12 @@ ${docImportCode}
 const pageRoutes = [
 ${pageRouteEntries.join(",\n")}
 ];
+const _pageRouteTrie = _buildRouteTrie(pageRoutes);
 
 const apiRoutes = [
 ${apiRouteEntries.join(",\n")}
 ];
+const _apiRouteTrie = _buildRouteTrie(apiRoutes);
 
 function matchRoute(url, routes) {
   const pathname = url.split("?")[0];
@@ -359,40 +378,8 @@ function matchRoute(url, routes) {
   // NOTE: Do NOT decodeURIComponent here. The pathname is already decoded at
   // the entry point. Decoding again would create a double-decode vector.
   const urlParts = normalizedUrl.split("/").filter(Boolean);
-  for (const route of routes) {
-    const params = matchPattern(urlParts, route.patternParts);
-    if (params !== null) return { route, params };
-  }
-  return null;
-}
-
-function matchPattern(urlParts, patternParts) {
-  const params = Object.create(null);
-  for (let i = 0; i < patternParts.length; i++) {
-    const pp = patternParts[i];
-    if (pp.endsWith("+")) {
-      if (i !== patternParts.length - 1) return null;
-      const paramName = pp.slice(1, -1);
-      const remaining = urlParts.slice(i);
-      if (remaining.length === 0) return null;
-      params[paramName] = remaining;
-      return params;
-    }
-    if (pp.endsWith("*")) {
-      if (i !== patternParts.length - 1) return null;
-      const paramName = pp.slice(1, -1);
-      params[paramName] = urlParts.slice(i);
-      return params;
-    }
-    if (pp.startsWith(":")) {
-      if (i >= urlParts.length) return null;
-      params[pp.slice(1)] = urlParts[i];
-      continue;
-    }
-    if (i >= urlParts.length || urlParts[i] !== pp) return null;
-  }
-  if (urlParts.length !== patternParts.length) return null;
-  return params;
+  const trie = routes === pageRoutes ? _pageRouteTrie : _apiRouteTrie;
+  return _trieMatch(trie, urlParts);
 }
 
 function parseQuery(url) {
@@ -1057,15 +1044,20 @@ export async function handleApiRoute(request, url) {
   }
   try {
     let body;
-    const ct = request.headers.get("content-type") || "";
+    const mediaType = getMediaType(request.headers.get("content-type"));
     let rawBody;
     try { rawBody = await readBodyWithLimit(request, 1 * 1024 * 1024); }
     catch { return new Response("Request body too large", { status: 413 }); }
     if (!rawBody) {
-      body = undefined;
-    } else if (ct.includes("application/json")) {
-      try { body = JSON.parse(rawBody); } catch { throw new ApiBodyParseError("Invalid JSON", 400); }
-    } else if (ct.includes("application/x-www-form-urlencoded")) {
+      body = isJsonMediaType(mediaType)
+        ? {}
+        : mediaType === "application/x-www-form-urlencoded"
+          ? decodeQueryString(rawBody)
+          : undefined;
+    } else if (isJsonMediaType(mediaType)) {
+      try { body = JSON.parse(rawBody); }
+      catch { throw new ApiBodyParseError("Invalid JSON", 400); }
+    } else if (mediaType === "application/x-www-form-urlencoded") {
       body = decodeQueryString(rawBody);
     } else {
       body = rawBody;
@@ -1079,7 +1071,7 @@ export async function handleApiRoute(request, url) {
     return await responsePromise;
   } catch (e) {
     if (e instanceof ApiBodyParseError) {
-      return new Response(e.message, { status: e.statusCode });
+      return new Response(e.message, { status: e.statusCode, statusText: e.message });
     }
     console.error("[vinext] API error:", e);
     return new Response("Internal Server Error", { status: 500 });

@@ -47,6 +47,7 @@ import { normalizePath } from "./normalize-path.js";
 import { hasBasePath, stripBasePath } from "../utils/base-path.js";
 import { computeLazyChunks } from "../index.js";
 import { manifestFileWithBase } from "../utils/manifest-paths.js";
+import { normalizePathnameForRouteMatchStrict } from "../routing/utils.js";
 import type { ExecutionContextLike } from "../shims/request-context.js";
 
 /** Convert a Node.js IncomingMessage into a ReadableStream for Web Request body. */
@@ -167,10 +168,19 @@ function sendCompressed(
   statusCode: number,
   extraHeaders: Record<string, string | string[]> = {},
   compress: boolean = true,
+  statusText: string | undefined = undefined,
 ): void {
   const buf = typeof body === "string" ? Buffer.from(body) : body;
   const baseType = contentType.split(";")[0].trim();
   const encoding = compress ? negotiateEncoding(req) : null;
+
+  const writeHead = (headers: Record<string, string | string[]>) => {
+    if (statusText) {
+      res.writeHead(statusCode, statusText, headers);
+    } else {
+      res.writeHead(statusCode, headers);
+    }
+  };
 
   if (encoding && COMPRESSIBLE_TYPES.has(baseType) && buf.length >= COMPRESS_THRESHOLD) {
     const compressor = createCompressor(encoding);
@@ -188,7 +198,7 @@ function sendCompressed(
     } else {
       varyValue = "Accept-Encoding";
     }
-    res.writeHead(statusCode, {
+    writeHead({
       ...extraHeaders,
       "Content-Type": contentType,
       "Content-Encoding": encoding,
@@ -202,7 +212,7 @@ function sendCompressed(
     // Strip any pre-existing content-length (from the Web Response constructor)
     // before setting our own — avoids duplicate Content-Length headers.
     const { "content-length": _cl, "Content-Length": _CL, ...headersWithoutLength } = extraHeaders;
-    res.writeHead(statusCode, {
+    writeHead({
       ...headersWithoutLength,
       "Content-Type": contentType,
       "Content-Length": String(buf.length),
@@ -404,15 +414,21 @@ const trustProxy = process.env.VINEXT_TRUST_PROXY === "1" || trustedHosts.size >
 
 /**
  * Convert a Node.js IncomingMessage to a Web Request object.
+ *
+ * When `urlOverride` is provided, it is used as the path + query string
+ * instead of `req.url`. This avoids redundant path normalization when the
+ * caller has already decoded and normalized the pathname (e.g. the App
+ * Router prod server normalizes before static-asset lookup, and can pass
+ * the result here so the downstream RSC handler doesn't re-normalize).
  */
-function nodeToWebRequest(req: IncomingMessage): Request {
+function nodeToWebRequest(req: IncomingMessage, urlOverride?: string): Request {
   const rawProto = trustProxy
     ? (req.headers["x-forwarded-proto"] as string)?.split(",")[0]?.trim()
     : undefined;
   const proto = rawProto === "https" || rawProto === "http" ? rawProto : "http";
   const host = resolveHost(req, "localhost");
   const origin = `${proto}://${host}`;
-  const url = new URL(req.url ?? "/", origin);
+  const url = new URL(urlOverride ?? req.url ?? "/", origin);
 
   const headers = new Headers();
   for (const [key, value] of Object.entries(req.headers)) {
@@ -453,6 +469,14 @@ async function sendWebResponse(
   compress: boolean,
 ): Promise<void> {
   const status = webResponse.status;
+  const statusText = webResponse.statusText || undefined;
+  const writeHead = (headers: Record<string, string | string[]>) => {
+    if (statusText) {
+      res.writeHead(status, statusText, headers);
+    } else {
+      res.writeHead(status, headers);
+    }
+  };
 
   // Collect headers, handling multi-value headers (e.g. Set-Cookie)
   const nodeHeaders: Record<string, string | string[]> = {};
@@ -466,7 +490,7 @@ async function sendWebResponse(
   });
 
   if (!webResponse.body) {
-    res.writeHead(status, nodeHeaders);
+    writeHead(nodeHeaders);
     res.end();
     return;
   }
@@ -497,7 +521,7 @@ async function sendWebResponse(
     }
   }
 
-  res.writeHead(status, nodeHeaders);
+  writeHead(nodeHeaders);
 
   // HEAD requests: send headers only, skip the body
   if (req.method === "HEAD") {
@@ -640,12 +664,12 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
   const rscHandler = resolveAppRouterHandler(rscModule.default);
 
   const server = createServer(async (req, res) => {
-    const url = req.url ?? "/";
+    const rawUrl = req.url ?? "/";
     // Normalize backslashes (browsers treat /\ as //), then decode and normalize path.
-    const rawPathname = url.split("?")[0].replaceAll("\\", "/");
+    const rawPathname = rawUrl.split("?")[0].replaceAll("\\", "/");
     let pathname: string;
     try {
-      pathname = normalizePath(decodeURIComponent(rawPathname));
+      pathname = normalizePath(normalizePathnameForRouteMatchStrict(rawPathname));
     } catch {
       // Malformed percent-encoding (e.g. /%E0%A4%A) — return 400 instead of crashing.
       res.writeHead(400);
@@ -669,7 +693,7 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
     // Image optimization passthrough (Node.js prod server has no Images binding;
     // serves the original file with cache headers and security headers)
     if (pathname === IMAGE_OPTIMIZATION_PATH) {
-      const parsedUrl = new URL(url, "http://localhost");
+      const parsedUrl = new URL(rawUrl, "http://localhost");
       const defaultAllowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
       const params = parseImageParams(parsedUrl, defaultAllowedWidths);
       if (!params) {
@@ -691,7 +715,8 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
         "Content-Security-Policy":
           imageConfig?.contentSecurityPolicy ?? IMAGE_CONTENT_SECURITY_POLICY,
         "X-Content-Type-Options": "nosniff",
-        "Content-Disposition": imageConfig?.contentDispositionType ?? "inline",
+        "Content-Disposition":
+          imageConfig?.contentDispositionType === "attachment" ? "attachment" : "inline",
       };
       if (tryServeStatic(req, res, clientDir, params.imageUrl, false, imageSecurityHeaders)) {
         return;
@@ -702,8 +727,14 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
     }
 
     try {
+      // Build the normalized URL (pathname + original query string) so the
+      // RSC handler receives an already-canonical path and doesn't need to
+      // re-normalize. This deduplicates the normalizePath work done above.
+      const qs = rawUrl.includes("?") ? rawUrl.slice(rawUrl.indexOf("?")) : "";
+      const normalizedUrl = pathname + qs;
+
       // Convert Node.js request to Web Request and call the RSC handler
-      const request = nodeToWebRequest(req);
+      const request = nodeToWebRequest(req, normalizedUrl);
       const response = await rscHandler(request);
 
       // Stream the Web Response back to the Node.js response
@@ -820,7 +851,7 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
     const rawQs = rawUrl.includes("?") ? rawUrl.slice(rawUrl.indexOf("?")) : "";
     let pathname: string;
     try {
-      pathname = normalizePath(decodeURIComponent(rawPagesPathname));
+      pathname = normalizePath(normalizePathnameForRouteMatchStrict(rawPagesPathname));
     } catch {
       // Malformed percent-encoding (e.g. /%E0%A4%A) — return 400 instead of crashing.
       res.writeHead(400);
@@ -872,7 +903,8 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
         "Content-Security-Policy":
           pagesImageConfig?.contentSecurityPolicy ?? IMAGE_CONTENT_SECURITY_POLICY,
         "X-Content-Type-Options": "nosniff",
-        "Content-Disposition": pagesImageConfig?.contentDispositionType ?? "inline",
+        "Content-Disposition":
+          pagesImageConfig?.contentDispositionType === "attachment" ? "attachment" : "inline",
       };
       if (tryServeStatic(req, res, clientDir, params.imageUrl, false, imageSecurityHeaders)) {
         return;
@@ -997,7 +1029,11 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
             });
             const setCookies = result.response.headers.getSetCookie?.() ?? [];
             if (setCookies.length > 0) respHeaders["set-cookie"] = setCookies;
-            res.writeHead(result.response.status, respHeaders);
+            if (result.response.statusText) {
+              res.writeHead(result.response.status, result.response.statusText, respHeaders);
+            } else {
+              res.writeHead(result.response.status, respHeaders);
+            }
             res.end(body);
             return;
           }
@@ -1105,15 +1141,19 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
         // the handler doesn't set an explicit Content-Type.
         const ct = response.headers.get("content-type") ?? "application/octet-stream";
         const responseHeaders = mergeResponseHeaders(middlewareHeaders, response);
+        const finalStatus = middlewareRewriteStatus ?? response.status;
+        const finalStatusText =
+          finalStatus === response.status ? response.statusText || undefined : undefined;
 
         sendCompressed(
           req,
           res,
           responseBody,
           ct,
-          middlewareRewriteStatus ?? response.status,
+          finalStatus,
           responseHeaders,
           compress,
+          finalStatusText,
         );
         return;
       }
@@ -1198,15 +1238,19 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
       const responseBody = Buffer.from(await response.arrayBuffer());
       const ct = response.headers.get("content-type") ?? "text/html";
       const responseHeaders = mergeResponseHeaders(middlewareHeaders, response);
+      const finalStatus = middlewareRewriteStatus ?? response.status;
+      const finalStatusText =
+        finalStatus === response.status ? response.statusText || undefined : undefined;
 
       sendCompressed(
         req,
         res,
         responseBody,
         ct,
-        middlewareRewriteStatus ?? response.status,
+        finalStatus,
         responseHeaders,
         compress,
+        finalStatusText,
       );
     } catch (e) {
       console.error("[vinext] Server error:", e);

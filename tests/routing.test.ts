@@ -147,6 +147,29 @@ describe("matchRoute - URL matching", () => {
     expect(result!.params).toEqual({ id: "42" });
   });
 
+  it("preserves encoded slashes within a single static segment", () => {
+    const encodedRoute = {
+      pattern: "/a%2Fb",
+      patternParts: ["a%2Fb"],
+      filePath: "/tmp/pages/a%2Fb.tsx",
+      isDynamic: false,
+      params: [],
+    } as Route;
+    const nestedRoute = {
+      pattern: "/a/b",
+      patternParts: ["a", "b"],
+      filePath: "/tmp/pages/a/b.tsx",
+      isDynamic: false,
+      params: [],
+    } as Route;
+
+    expect(matchRoute("/a%2Fb", [encodedRoute, nestedRoute])?.route.pattern).toBe("/a%2Fb");
+    expect(matchRoute("/a/b", [encodedRoute, nestedRoute])?.route.pattern).toBe("/a/b");
+    // Lowercase %2f should also match: normalizePathnameForRouteMatch decodes
+    // then re-encodes via encodeURIComponent, which always produces uppercase.
+    expect(matchRoute("/a%2fb", [encodedRoute, nestedRoute])?.route.pattern).toBe("/a%2Fb");
+  });
+
   it("returns null for unmatched routes", async () => {
     const routes = await pagesRouter(FIXTURE_DIR);
 
@@ -819,6 +842,26 @@ describe("matchAppRoute - URL matching", () => {
     expect(result).not.toBeNull();
     expect(result!.route.pattern).toBe("/_sites/:subdomain");
     expect(result!.params).toEqual({ subdomain: "my-site" });
+  });
+
+  it("keeps encoded slashes distinct from real nested routes", async () => {
+    await withTempDir("vinext-app-encoded-slash-route-", async (tmpDir) => {
+      const appDir = path.join(tmpDir, "app");
+      await mkdir(path.join(appDir, "a%2Fb"), { recursive: true });
+      await mkdir(path.join(appDir, "a", "b"), { recursive: true });
+      await writeFile(path.join(appDir, "a%2Fb", "page.tsx"), EMPTY_PAGE);
+      await writeFile(path.join(appDir, "a", "b", "page.tsx"), EMPTY_PAGE);
+
+      invalidateAppRouteCache();
+      const routes = await appRouter(appDir);
+      const patterns = routes.map((route) => route.pattern);
+
+      expect(patterns).toContain("/a%2Fb");
+      expect(patterns).toContain("/a/b");
+
+      expect(matchAppRoute("/a%2Fb", routes)?.route.pattern).toBe("/a%2Fb");
+      expect(matchAppRoute("/a/b", routes)?.route.pattern).toBe("/a/b");
+    });
   });
 
   it("prioritizes static-prefix routes over bare catch-all routes", async () => {

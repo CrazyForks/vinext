@@ -357,6 +357,7 @@ import { validateCsrfOrigin, validateImageUrl, guardProtocolRelativeUrl, hasBase
 import { _consumeRequestScopedCacheLife, _runWithCacheState, getCacheHandler } from "next/cache";
 import { runWithExecutionContext as _runWithExecutionContext, getRequestExecutionContext as _getRequestExecutionContext } from "<ROOT>/packages/vinext/src/shims/request-context.js";
 import { getCollectedFetchTags, runWithFetchCache } from "vinext/fetch-cache";
+import { buildRouteTrie as _buildRouteTrie, trieMatch as _trieMatch } from "<ROOT>/packages/vinext/src/routing/route-trie.js";
 import { runWithPrivateCache as _runWithPrivateCache } from "vinext/cache-runtime";
 // Import server-only state module to register ALS-backed accessors.
 import { runWithNavigationContext as _runWithNavigationContext } from "vinext/navigation-state";
@@ -760,6 +761,7 @@ const routes = [
     unauthorized: null,
   }
 ];
+const _routeTrie = _buildRouteTrie(routes);
 
 const metadataRoutes = [
 
@@ -1025,20 +1027,17 @@ async function renderErrorBoundaryPage(route, error, isRscRequest, request, matc
   });
 }
 
-function matchRoute(url, routes) {
+function matchRoute(url) {
   const pathname = url.split("?")[0];
   let normalizedUrl = pathname === "/" ? "/" : pathname.replace(/\\/$/, "");
    // NOTE: Do NOT decodeURIComponent here. The caller is responsible for decoding
    // the pathname exactly once at the request entry point. Decoding again here
    // would cause inconsistent path matching between middleware and routing.
   const urlParts = normalizedUrl.split("/").filter(Boolean);
-  for (const route of routes) {
-    const params = matchPattern(urlParts, route.patternParts);
-    if (params !== null) return { route, params };
-  }
-  return null;
+  return _trieMatch(_routeTrie, urlParts);
 }
 
+// matchPattern is kept for findIntercept (linear scan over small interceptLookup array).
 function matchPattern(urlParts, patternParts) {
   const params = Object.create(null);
   for (let i = 0; i < patternParts.length; i++) {
@@ -1542,6 +1541,32 @@ function __normalizePath(pathname) {
   return "/" + resolved.join("/");
 }
 
+const __pathDelimiterRegex = /([/#?\\\\]|%(2f|23|3f|5c))/gi;
+function __decodeRouteSegment(segment) {
+  return decodeURIComponent(segment).replace(__pathDelimiterRegex, function (char) {
+    return encodeURIComponent(char);
+  });
+}
+function __decodeRouteSegmentSafe(segment) {
+  try { return __decodeRouteSegment(segment); } catch (e) { return segment; }
+}
+function __normalizePathnameForRouteMatch(pathname) {
+  const segments = pathname.split("/");
+  const normalized = [];
+  for (let i = 0; i < segments.length; i++) {
+    normalized.push(__decodeRouteSegmentSafe(segments[i]));
+  }
+  return normalized.join("/");
+}
+function __normalizePathnameForRouteMatchStrict(pathname) {
+  const segments = pathname.split("/");
+  const normalized = [];
+  for (let i = 0; i < segments.length; i++) {
+    normalized.push(__decodeRouteSegment(segments[i]));
+  }
+  return normalized.join("/");
+}
+
 // ── Config pattern matching, redirects, rewrites, headers, CSRF validation,
 //    external URL proxy, cookie parsing, and request context are imported from
 //    config-matchers.ts and request-pipeline.ts (see import statements above).
@@ -1667,7 +1692,7 @@ export default async function handler(request, ctx) {
               if (__configHeaders.length) {
                 const url = new URL(request.url);
                 let pathname;
-                try { pathname = __normalizePath(decodeURIComponent(url.pathname)); } catch { pathname = url.pathname; }
+                try { pathname = __normalizePath(__normalizePathnameForRouteMatch(url.pathname)); } catch { pathname = url.pathname; }
                 
                 const extraHeaders = matchHeaders(pathname, __configHeaders, __reqCtx);
                 for (const h of extraHeaders) {
@@ -1716,11 +1741,11 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   const __protoGuard = guardProtocolRelativeUrl(url.pathname);
   if (__protoGuard) return __protoGuard;
 
-  // Decode percent-encoding and normalize pathname to canonical form.
-  // decodeURIComponent prevents /%61dmin from bypassing /admin matchers.
+  // Decode percent-encoding segment-wise and normalize pathname to canonical form.
+  // This preserves encoded path delimiters like %2F within a single segment.
   // __normalizePath collapses //foo///bar → /foo/bar, resolves . and .. segments.
   let decodedUrlPathname;
-  try { decodedUrlPathname = decodeURIComponent(url.pathname); } catch (e) {
+  try { decodedUrlPathname = __normalizePathnameForRouteMatchStrict(url.pathname); } catch (e) {
     return new Response("Bad Request", { status: 400 });
   }
   let pathname = __normalizePath(decodedUrlPathname);
@@ -1972,7 +1997,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
 
       // After the action, re-render the current page so the client
       // gets an updated React tree reflecting any mutations.
-      const match = matchRoute(cleanPathname, routes);
+      const match = matchRoute(cleanPathname);
       let element;
       if (match) {
         const { route: actionRoute, params: actionParams } = match;
@@ -2047,7 +2072,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     }
   }
 
-  let match = matchRoute(cleanPathname, routes);
+  let match = matchRoute(cleanPathname);
 
   // ── Fallback rewrites from next.config.js (if no route matched) ───────
   if (!match && __configRewrites.fallback && __configRewrites.fallback.length) {
@@ -2059,7 +2084,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         return proxyExternalRequest(request, __fallbackRewritten);
       }
       cleanPathname = __fallbackRewritten;
-      match = matchRoute(cleanPathname, routes);
+      match = matchRoute(cleanPathname);
     }
   }
 
@@ -2495,7 +2520,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       const sourceRoute = routes[intercept.sourceRouteIndex];
       if (sourceRoute && sourceRoute !== route) {
         // Render the source route (e.g. /feed) with the intercepting page in the slot
-        const sourceMatch = matchRoute(sourceRoute.pattern, routes);
+        const sourceMatch = matchRoute(sourceRoute.pattern);
         const sourceParams = sourceMatch ? sourceMatch.params : {};
         setNavigationContext({
           pathname: cleanPathname,
@@ -3104,6 +3129,7 @@ import { validateCsrfOrigin, validateImageUrl, guardProtocolRelativeUrl, hasBase
 import { _consumeRequestScopedCacheLife, _runWithCacheState, getCacheHandler } from "next/cache";
 import { runWithExecutionContext as _runWithExecutionContext, getRequestExecutionContext as _getRequestExecutionContext } from "<ROOT>/packages/vinext/src/shims/request-context.js";
 import { getCollectedFetchTags, runWithFetchCache } from "vinext/fetch-cache";
+import { buildRouteTrie as _buildRouteTrie, trieMatch as _trieMatch } from "<ROOT>/packages/vinext/src/routing/route-trie.js";
 import { runWithPrivateCache as _runWithPrivateCache } from "vinext/cache-runtime";
 // Import server-only state module to register ALS-backed accessors.
 import { runWithNavigationContext as _runWithNavigationContext } from "vinext/navigation-state";
@@ -3507,6 +3533,7 @@ const routes = [
     unauthorized: null,
   }
 ];
+const _routeTrie = _buildRouteTrie(routes);
 
 const metadataRoutes = [
 
@@ -3772,20 +3799,17 @@ async function renderErrorBoundaryPage(route, error, isRscRequest, request, matc
   });
 }
 
-function matchRoute(url, routes) {
+function matchRoute(url) {
   const pathname = url.split("?")[0];
   let normalizedUrl = pathname === "/" ? "/" : pathname.replace(/\\/$/, "");
    // NOTE: Do NOT decodeURIComponent here. The caller is responsible for decoding
    // the pathname exactly once at the request entry point. Decoding again here
    // would cause inconsistent path matching between middleware and routing.
   const urlParts = normalizedUrl.split("/").filter(Boolean);
-  for (const route of routes) {
-    const params = matchPattern(urlParts, route.patternParts);
-    if (params !== null) return { route, params };
-  }
-  return null;
+  return _trieMatch(_routeTrie, urlParts);
 }
 
+// matchPattern is kept for findIntercept (linear scan over small interceptLookup array).
 function matchPattern(urlParts, patternParts) {
   const params = Object.create(null);
   for (let i = 0; i < patternParts.length; i++) {
@@ -4289,6 +4313,32 @@ function __normalizePath(pathname) {
   return "/" + resolved.join("/");
 }
 
+const __pathDelimiterRegex = /([/#?\\\\]|%(2f|23|3f|5c))/gi;
+function __decodeRouteSegment(segment) {
+  return decodeURIComponent(segment).replace(__pathDelimiterRegex, function (char) {
+    return encodeURIComponent(char);
+  });
+}
+function __decodeRouteSegmentSafe(segment) {
+  try { return __decodeRouteSegment(segment); } catch (e) { return segment; }
+}
+function __normalizePathnameForRouteMatch(pathname) {
+  const segments = pathname.split("/");
+  const normalized = [];
+  for (let i = 0; i < segments.length; i++) {
+    normalized.push(__decodeRouteSegmentSafe(segments[i]));
+  }
+  return normalized.join("/");
+}
+function __normalizePathnameForRouteMatchStrict(pathname) {
+  const segments = pathname.split("/");
+  const normalized = [];
+  for (let i = 0; i < segments.length; i++) {
+    normalized.push(__decodeRouteSegment(segments[i]));
+  }
+  return normalized.join("/");
+}
+
 // ── Config pattern matching, redirects, rewrites, headers, CSRF validation,
 //    external URL proxy, cookie parsing, and request context are imported from
 //    config-matchers.ts and request-pipeline.ts (see import statements above).
@@ -4414,7 +4464,7 @@ export default async function handler(request, ctx) {
               if (__configHeaders.length) {
                 const url = new URL(request.url);
                 let pathname;
-                try { pathname = __normalizePath(decodeURIComponent(url.pathname)); } catch { pathname = url.pathname; }
+                try { pathname = __normalizePath(__normalizePathnameForRouteMatch(url.pathname)); } catch { pathname = url.pathname; }
                 if (pathname.startsWith("/base")) pathname = pathname.slice("/base".length) || "/";
                 const extraHeaders = matchHeaders(pathname, __configHeaders, __reqCtx);
                 for (const h of extraHeaders) {
@@ -4463,11 +4513,11 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   const __protoGuard = guardProtocolRelativeUrl(url.pathname);
   if (__protoGuard) return __protoGuard;
 
-  // Decode percent-encoding and normalize pathname to canonical form.
-  // decodeURIComponent prevents /%61dmin from bypassing /admin matchers.
+  // Decode percent-encoding segment-wise and normalize pathname to canonical form.
+  // This preserves encoded path delimiters like %2F within a single segment.
   // __normalizePath collapses //foo///bar → /foo/bar, resolves . and .. segments.
   let decodedUrlPathname;
-  try { decodedUrlPathname = decodeURIComponent(url.pathname); } catch (e) {
+  try { decodedUrlPathname = __normalizePathnameForRouteMatchStrict(url.pathname); } catch (e) {
     return new Response("Bad Request", { status: 400 });
   }
   let pathname = __normalizePath(decodedUrlPathname);
@@ -4722,7 +4772,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
 
       // After the action, re-render the current page so the client
       // gets an updated React tree reflecting any mutations.
-      const match = matchRoute(cleanPathname, routes);
+      const match = matchRoute(cleanPathname);
       let element;
       if (match) {
         const { route: actionRoute, params: actionParams } = match;
@@ -4797,7 +4847,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     }
   }
 
-  let match = matchRoute(cleanPathname, routes);
+  let match = matchRoute(cleanPathname);
 
   // ── Fallback rewrites from next.config.js (if no route matched) ───────
   if (!match && __configRewrites.fallback && __configRewrites.fallback.length) {
@@ -4809,7 +4859,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         return proxyExternalRequest(request, __fallbackRewritten);
       }
       cleanPathname = __fallbackRewritten;
-      match = matchRoute(cleanPathname, routes);
+      match = matchRoute(cleanPathname);
     }
   }
 
@@ -5245,7 +5295,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       const sourceRoute = routes[intercept.sourceRouteIndex];
       if (sourceRoute && sourceRoute !== route) {
         // Render the source route (e.g. /feed) with the intercepting page in the slot
-        const sourceMatch = matchRoute(sourceRoute.pattern, routes);
+        const sourceMatch = matchRoute(sourceRoute.pattern);
         const sourceParams = sourceMatch ? sourceMatch.params : {};
         setNavigationContext({
           pathname: cleanPathname,
@@ -5854,6 +5904,7 @@ import { validateCsrfOrigin, validateImageUrl, guardProtocolRelativeUrl, hasBase
 import { _consumeRequestScopedCacheLife, _runWithCacheState, getCacheHandler } from "next/cache";
 import { runWithExecutionContext as _runWithExecutionContext, getRequestExecutionContext as _getRequestExecutionContext } from "<ROOT>/packages/vinext/src/shims/request-context.js";
 import { getCollectedFetchTags, runWithFetchCache } from "vinext/fetch-cache";
+import { buildRouteTrie as _buildRouteTrie, trieMatch as _trieMatch } from "<ROOT>/packages/vinext/src/routing/route-trie.js";
 import { runWithPrivateCache as _runWithPrivateCache } from "vinext/cache-runtime";
 // Import server-only state module to register ALS-backed accessors.
 import { runWithNavigationContext as _runWithNavigationContext } from "vinext/navigation-state";
@@ -6258,6 +6309,7 @@ const routes = [
     unauthorized: null,
   }
 ];
+const _routeTrie = _buildRouteTrie(routes);
 
 const metadataRoutes = [
 
@@ -6544,20 +6596,17 @@ async function renderErrorBoundaryPage(route, error, isRscRequest, request, matc
   });
 }
 
-function matchRoute(url, routes) {
+function matchRoute(url) {
   const pathname = url.split("?")[0];
   let normalizedUrl = pathname === "/" ? "/" : pathname.replace(/\\/$/, "");
    // NOTE: Do NOT decodeURIComponent here. The caller is responsible for decoding
    // the pathname exactly once at the request entry point. Decoding again here
    // would cause inconsistent path matching between middleware and routing.
   const urlParts = normalizedUrl.split("/").filter(Boolean);
-  for (const route of routes) {
-    const params = matchPattern(urlParts, route.patternParts);
-    if (params !== null) return { route, params };
-  }
-  return null;
+  return _trieMatch(_routeTrie, urlParts);
 }
 
+// matchPattern is kept for findIntercept (linear scan over small interceptLookup array).
 function matchPattern(urlParts, patternParts) {
   const params = Object.create(null);
   for (let i = 0; i < patternParts.length; i++) {
@@ -7069,6 +7118,32 @@ function __normalizePath(pathname) {
   return "/" + resolved.join("/");
 }
 
+const __pathDelimiterRegex = /([/#?\\\\]|%(2f|23|3f|5c))/gi;
+function __decodeRouteSegment(segment) {
+  return decodeURIComponent(segment).replace(__pathDelimiterRegex, function (char) {
+    return encodeURIComponent(char);
+  });
+}
+function __decodeRouteSegmentSafe(segment) {
+  try { return __decodeRouteSegment(segment); } catch (e) { return segment; }
+}
+function __normalizePathnameForRouteMatch(pathname) {
+  const segments = pathname.split("/");
+  const normalized = [];
+  for (let i = 0; i < segments.length; i++) {
+    normalized.push(__decodeRouteSegmentSafe(segments[i]));
+  }
+  return normalized.join("/");
+}
+function __normalizePathnameForRouteMatchStrict(pathname) {
+  const segments = pathname.split("/");
+  const normalized = [];
+  for (let i = 0; i < segments.length; i++) {
+    normalized.push(__decodeRouteSegment(segments[i]));
+  }
+  return normalized.join("/");
+}
+
 // ── Config pattern matching, redirects, rewrites, headers, CSRF validation,
 //    external URL proxy, cookie parsing, and request context are imported from
 //    config-matchers.ts and request-pipeline.ts (see import statements above).
@@ -7194,7 +7269,7 @@ export default async function handler(request, ctx) {
               if (__configHeaders.length) {
                 const url = new URL(request.url);
                 let pathname;
-                try { pathname = __normalizePath(decodeURIComponent(url.pathname)); } catch { pathname = url.pathname; }
+                try { pathname = __normalizePath(__normalizePathnameForRouteMatch(url.pathname)); } catch { pathname = url.pathname; }
                 
                 const extraHeaders = matchHeaders(pathname, __configHeaders, __reqCtx);
                 for (const h of extraHeaders) {
@@ -7243,11 +7318,11 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   const __protoGuard = guardProtocolRelativeUrl(url.pathname);
   if (__protoGuard) return __protoGuard;
 
-  // Decode percent-encoding and normalize pathname to canonical form.
-  // decodeURIComponent prevents /%61dmin from bypassing /admin matchers.
+  // Decode percent-encoding segment-wise and normalize pathname to canonical form.
+  // This preserves encoded path delimiters like %2F within a single segment.
   // __normalizePath collapses //foo///bar → /foo/bar, resolves . and .. segments.
   let decodedUrlPathname;
-  try { decodedUrlPathname = decodeURIComponent(url.pathname); } catch (e) {
+  try { decodedUrlPathname = __normalizePathnameForRouteMatchStrict(url.pathname); } catch (e) {
     return new Response("Bad Request", { status: 400 });
   }
   let pathname = __normalizePath(decodedUrlPathname);
@@ -7499,7 +7574,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
 
       // After the action, re-render the current page so the client
       // gets an updated React tree reflecting any mutations.
-      const match = matchRoute(cleanPathname, routes);
+      const match = matchRoute(cleanPathname);
       let element;
       if (match) {
         const { route: actionRoute, params: actionParams } = match;
@@ -7574,7 +7649,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     }
   }
 
-  let match = matchRoute(cleanPathname, routes);
+  let match = matchRoute(cleanPathname);
 
   // ── Fallback rewrites from next.config.js (if no route matched) ───────
   if (!match && __configRewrites.fallback && __configRewrites.fallback.length) {
@@ -7586,7 +7661,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         return proxyExternalRequest(request, __fallbackRewritten);
       }
       cleanPathname = __fallbackRewritten;
-      match = matchRoute(cleanPathname, routes);
+      match = matchRoute(cleanPathname);
     }
   }
 
@@ -8022,7 +8097,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       const sourceRoute = routes[intercept.sourceRouteIndex];
       if (sourceRoute && sourceRoute !== route) {
         // Render the source route (e.g. /feed) with the intercepting page in the slot
-        const sourceMatch = matchRoute(sourceRoute.pattern, routes);
+        const sourceMatch = matchRoute(sourceRoute.pattern);
         const sourceParams = sourceMatch ? sourceMatch.params : {};
         setNavigationContext({
           pathname: cleanPathname,
@@ -8639,6 +8714,7 @@ import { validateCsrfOrigin, validateImageUrl, guardProtocolRelativeUrl, hasBase
 import { _consumeRequestScopedCacheLife, _runWithCacheState, getCacheHandler } from "next/cache";
 import { runWithExecutionContext as _runWithExecutionContext, getRequestExecutionContext as _getRequestExecutionContext } from "<ROOT>/packages/vinext/src/shims/request-context.js";
 import { getCollectedFetchTags, runWithFetchCache } from "vinext/fetch-cache";
+import { buildRouteTrie as _buildRouteTrie, trieMatch as _trieMatch } from "<ROOT>/packages/vinext/src/routing/route-trie.js";
 import { runWithPrivateCache as _runWithPrivateCache } from "vinext/cache-runtime";
 // Import server-only state module to register ALS-backed accessors.
 import { runWithNavigationContext as _runWithNavigationContext } from "vinext/navigation-state";
@@ -9071,6 +9147,7 @@ const routes = [
     unauthorized: null,
   }
 ];
+const _routeTrie = _buildRouteTrie(routes);
 
 const metadataRoutes = [
 
@@ -9336,20 +9413,17 @@ async function renderErrorBoundaryPage(route, error, isRscRequest, request, matc
   });
 }
 
-function matchRoute(url, routes) {
+function matchRoute(url) {
   const pathname = url.split("?")[0];
   let normalizedUrl = pathname === "/" ? "/" : pathname.replace(/\\/$/, "");
    // NOTE: Do NOT decodeURIComponent here. The caller is responsible for decoding
    // the pathname exactly once at the request entry point. Decoding again here
    // would cause inconsistent path matching between middleware and routing.
   const urlParts = normalizedUrl.split("/").filter(Boolean);
-  for (const route of routes) {
-    const params = matchPattern(urlParts, route.patternParts);
-    if (params !== null) return { route, params };
-  }
-  return null;
+  return _trieMatch(_routeTrie, urlParts);
 }
 
+// matchPattern is kept for findIntercept (linear scan over small interceptLookup array).
 function matchPattern(urlParts, patternParts) {
   const params = Object.create(null);
   for (let i = 0; i < patternParts.length; i++) {
@@ -9853,6 +9927,32 @@ function __normalizePath(pathname) {
   return "/" + resolved.join("/");
 }
 
+const __pathDelimiterRegex = /([/#?\\\\]|%(2f|23|3f|5c))/gi;
+function __decodeRouteSegment(segment) {
+  return decodeURIComponent(segment).replace(__pathDelimiterRegex, function (char) {
+    return encodeURIComponent(char);
+  });
+}
+function __decodeRouteSegmentSafe(segment) {
+  try { return __decodeRouteSegment(segment); } catch (e) { return segment; }
+}
+function __normalizePathnameForRouteMatch(pathname) {
+  const segments = pathname.split("/");
+  const normalized = [];
+  for (let i = 0; i < segments.length; i++) {
+    normalized.push(__decodeRouteSegmentSafe(segments[i]));
+  }
+  return normalized.join("/");
+}
+function __normalizePathnameForRouteMatchStrict(pathname) {
+  const segments = pathname.split("/");
+  const normalized = [];
+  for (let i = 0; i < segments.length; i++) {
+    normalized.push(__decodeRouteSegment(segments[i]));
+  }
+  return normalized.join("/");
+}
+
 // ── Config pattern matching, redirects, rewrites, headers, CSRF validation,
 //    external URL proxy, cookie parsing, and request context are imported from
 //    config-matchers.ts and request-pipeline.ts (see import statements above).
@@ -9981,7 +10081,7 @@ export default async function handler(request, ctx) {
               if (__configHeaders.length) {
                 const url = new URL(request.url);
                 let pathname;
-                try { pathname = __normalizePath(decodeURIComponent(url.pathname)); } catch { pathname = url.pathname; }
+                try { pathname = __normalizePath(__normalizePathnameForRouteMatch(url.pathname)); } catch { pathname = url.pathname; }
                 
                 const extraHeaders = matchHeaders(pathname, __configHeaders, __reqCtx);
                 for (const h of extraHeaders) {
@@ -10030,11 +10130,11 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   const __protoGuard = guardProtocolRelativeUrl(url.pathname);
   if (__protoGuard) return __protoGuard;
 
-  // Decode percent-encoding and normalize pathname to canonical form.
-  // decodeURIComponent prevents /%61dmin from bypassing /admin matchers.
+  // Decode percent-encoding segment-wise and normalize pathname to canonical form.
+  // This preserves encoded path delimiters like %2F within a single segment.
   // __normalizePath collapses //foo///bar → /foo/bar, resolves . and .. segments.
   let decodedUrlPathname;
-  try { decodedUrlPathname = decodeURIComponent(url.pathname); } catch (e) {
+  try { decodedUrlPathname = __normalizePathnameForRouteMatchStrict(url.pathname); } catch (e) {
     return new Response("Bad Request", { status: 400 });
   }
   let pathname = __normalizePath(decodedUrlPathname);
@@ -10286,7 +10386,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
 
       // After the action, re-render the current page so the client
       // gets an updated React tree reflecting any mutations.
-      const match = matchRoute(cleanPathname, routes);
+      const match = matchRoute(cleanPathname);
       let element;
       if (match) {
         const { route: actionRoute, params: actionParams } = match;
@@ -10361,7 +10461,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     }
   }
 
-  let match = matchRoute(cleanPathname, routes);
+  let match = matchRoute(cleanPathname);
 
   // ── Fallback rewrites from next.config.js (if no route matched) ───────
   if (!match && __configRewrites.fallback && __configRewrites.fallback.length) {
@@ -10373,7 +10473,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         return proxyExternalRequest(request, __fallbackRewritten);
       }
       cleanPathname = __fallbackRewritten;
-      match = matchRoute(cleanPathname, routes);
+      match = matchRoute(cleanPathname);
     }
   }
 
@@ -10809,7 +10909,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       const sourceRoute = routes[intercept.sourceRouteIndex];
       if (sourceRoute && sourceRoute !== route) {
         // Render the source route (e.g. /feed) with the intercepting page in the slot
-        const sourceMatch = matchRoute(sourceRoute.pattern, routes);
+        const sourceMatch = matchRoute(sourceRoute.pattern);
         const sourceParams = sourceMatch ? sourceMatch.params : {};
         setNavigationContext({
           pathname: cleanPathname,
@@ -11418,6 +11518,7 @@ import { validateCsrfOrigin, validateImageUrl, guardProtocolRelativeUrl, hasBase
 import { _consumeRequestScopedCacheLife, _runWithCacheState, getCacheHandler } from "next/cache";
 import { runWithExecutionContext as _runWithExecutionContext, getRequestExecutionContext as _getRequestExecutionContext } from "<ROOT>/packages/vinext/src/shims/request-context.js";
 import { getCollectedFetchTags, runWithFetchCache } from "vinext/fetch-cache";
+import { buildRouteTrie as _buildRouteTrie, trieMatch as _trieMatch } from "<ROOT>/packages/vinext/src/routing/route-trie.js";
 import { runWithPrivateCache as _runWithPrivateCache } from "vinext/cache-runtime";
 // Import server-only state module to register ALS-backed accessors.
 import { runWithNavigationContext as _runWithNavigationContext } from "vinext/navigation-state";
@@ -11822,6 +11923,7 @@ const routes = [
     unauthorized: null,
   }
 ];
+const _routeTrie = _buildRouteTrie(routes);
 
 const metadataRoutes = [
   {
@@ -12093,20 +12195,17 @@ async function renderErrorBoundaryPage(route, error, isRscRequest, request, matc
   });
 }
 
-function matchRoute(url, routes) {
+function matchRoute(url) {
   const pathname = url.split("?")[0];
   let normalizedUrl = pathname === "/" ? "/" : pathname.replace(/\\/$/, "");
    // NOTE: Do NOT decodeURIComponent here. The caller is responsible for decoding
    // the pathname exactly once at the request entry point. Decoding again here
    // would cause inconsistent path matching between middleware and routing.
   const urlParts = normalizedUrl.split("/").filter(Boolean);
-  for (const route of routes) {
-    const params = matchPattern(urlParts, route.patternParts);
-    if (params !== null) return { route, params };
-  }
-  return null;
+  return _trieMatch(_routeTrie, urlParts);
 }
 
+// matchPattern is kept for findIntercept (linear scan over small interceptLookup array).
 function matchPattern(urlParts, patternParts) {
   const params = Object.create(null);
   for (let i = 0; i < patternParts.length; i++) {
@@ -12610,6 +12709,32 @@ function __normalizePath(pathname) {
   return "/" + resolved.join("/");
 }
 
+const __pathDelimiterRegex = /([/#?\\\\]|%(2f|23|3f|5c))/gi;
+function __decodeRouteSegment(segment) {
+  return decodeURIComponent(segment).replace(__pathDelimiterRegex, function (char) {
+    return encodeURIComponent(char);
+  });
+}
+function __decodeRouteSegmentSafe(segment) {
+  try { return __decodeRouteSegment(segment); } catch (e) { return segment; }
+}
+function __normalizePathnameForRouteMatch(pathname) {
+  const segments = pathname.split("/");
+  const normalized = [];
+  for (let i = 0; i < segments.length; i++) {
+    normalized.push(__decodeRouteSegmentSafe(segments[i]));
+  }
+  return normalized.join("/");
+}
+function __normalizePathnameForRouteMatchStrict(pathname) {
+  const segments = pathname.split("/");
+  const normalized = [];
+  for (let i = 0; i < segments.length; i++) {
+    normalized.push(__decodeRouteSegment(segments[i]));
+  }
+  return normalized.join("/");
+}
+
 // ── Config pattern matching, redirects, rewrites, headers, CSRF validation,
 //    external URL proxy, cookie parsing, and request context are imported from
 //    config-matchers.ts and request-pipeline.ts (see import statements above).
@@ -12735,7 +12860,7 @@ export default async function handler(request, ctx) {
               if (__configHeaders.length) {
                 const url = new URL(request.url);
                 let pathname;
-                try { pathname = __normalizePath(decodeURIComponent(url.pathname)); } catch { pathname = url.pathname; }
+                try { pathname = __normalizePath(__normalizePathnameForRouteMatch(url.pathname)); } catch { pathname = url.pathname; }
                 
                 const extraHeaders = matchHeaders(pathname, __configHeaders, __reqCtx);
                 for (const h of extraHeaders) {
@@ -12784,11 +12909,11 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   const __protoGuard = guardProtocolRelativeUrl(url.pathname);
   if (__protoGuard) return __protoGuard;
 
-  // Decode percent-encoding and normalize pathname to canonical form.
-  // decodeURIComponent prevents /%61dmin from bypassing /admin matchers.
+  // Decode percent-encoding segment-wise and normalize pathname to canonical form.
+  // This preserves encoded path delimiters like %2F within a single segment.
   // __normalizePath collapses //foo///bar → /foo/bar, resolves . and .. segments.
   let decodedUrlPathname;
-  try { decodedUrlPathname = decodeURIComponent(url.pathname); } catch (e) {
+  try { decodedUrlPathname = __normalizePathnameForRouteMatchStrict(url.pathname); } catch (e) {
     return new Response("Bad Request", { status: 400 });
   }
   let pathname = __normalizePath(decodedUrlPathname);
@@ -13040,7 +13165,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
 
       // After the action, re-render the current page so the client
       // gets an updated React tree reflecting any mutations.
-      const match = matchRoute(cleanPathname, routes);
+      const match = matchRoute(cleanPathname);
       let element;
       if (match) {
         const { route: actionRoute, params: actionParams } = match;
@@ -13115,7 +13240,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     }
   }
 
-  let match = matchRoute(cleanPathname, routes);
+  let match = matchRoute(cleanPathname);
 
   // ── Fallback rewrites from next.config.js (if no route matched) ───────
   if (!match && __configRewrites.fallback && __configRewrites.fallback.length) {
@@ -13127,7 +13252,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         return proxyExternalRequest(request, __fallbackRewritten);
       }
       cleanPathname = __fallbackRewritten;
-      match = matchRoute(cleanPathname, routes);
+      match = matchRoute(cleanPathname);
     }
   }
 
@@ -13563,7 +13688,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       const sourceRoute = routes[intercept.sourceRouteIndex];
       if (sourceRoute && sourceRoute !== route) {
         // Render the source route (e.g. /feed) with the intercepting page in the slot
-        const sourceMatch = matchRoute(sourceRoute.pattern, routes);
+        const sourceMatch = matchRoute(sourceRoute.pattern);
         const sourceParams = sourceMatch ? sourceMatch.params : {};
         setNavigationContext({
           pathname: cleanPathname,
@@ -14172,6 +14297,7 @@ import { validateCsrfOrigin, validateImageUrl, guardProtocolRelativeUrl, hasBase
 import { _consumeRequestScopedCacheLife, _runWithCacheState, getCacheHandler } from "next/cache";
 import { runWithExecutionContext as _runWithExecutionContext, getRequestExecutionContext as _getRequestExecutionContext } from "<ROOT>/packages/vinext/src/shims/request-context.js";
 import { getCollectedFetchTags, runWithFetchCache } from "vinext/fetch-cache";
+import { buildRouteTrie as _buildRouteTrie, trieMatch as _trieMatch } from "<ROOT>/packages/vinext/src/routing/route-trie.js";
 import { runWithPrivateCache as _runWithPrivateCache } from "vinext/cache-runtime";
 // Import server-only state module to register ALS-backed accessors.
 import { runWithNavigationContext as _runWithNavigationContext } from "vinext/navigation-state";
@@ -14575,6 +14701,7 @@ const routes = [
     unauthorized: null,
   }
 ];
+const _routeTrie = _buildRouteTrie(routes);
 
 const metadataRoutes = [
 
@@ -14840,20 +14967,17 @@ async function renderErrorBoundaryPage(route, error, isRscRequest, request, matc
   });
 }
 
-function matchRoute(url, routes) {
+function matchRoute(url) {
   const pathname = url.split("?")[0];
   let normalizedUrl = pathname === "/" ? "/" : pathname.replace(/\\/$/, "");
    // NOTE: Do NOT decodeURIComponent here. The caller is responsible for decoding
    // the pathname exactly once at the request entry point. Decoding again here
    // would cause inconsistent path matching between middleware and routing.
   const urlParts = normalizedUrl.split("/").filter(Boolean);
-  for (const route of routes) {
-    const params = matchPattern(urlParts, route.patternParts);
-    if (params !== null) return { route, params };
-  }
-  return null;
+  return _trieMatch(_routeTrie, urlParts);
 }
 
+// matchPattern is kept for findIntercept (linear scan over small interceptLookup array).
 function matchPattern(urlParts, patternParts) {
   const params = Object.create(null);
   for (let i = 0; i < patternParts.length; i++) {
@@ -15553,6 +15677,32 @@ function __normalizePath(pathname) {
   return "/" + resolved.join("/");
 }
 
+const __pathDelimiterRegex = /([/#?\\\\]|%(2f|23|3f|5c))/gi;
+function __decodeRouteSegment(segment) {
+  return decodeURIComponent(segment).replace(__pathDelimiterRegex, function (char) {
+    return encodeURIComponent(char);
+  });
+}
+function __decodeRouteSegmentSafe(segment) {
+  try { return __decodeRouteSegment(segment); } catch (e) { return segment; }
+}
+function __normalizePathnameForRouteMatch(pathname) {
+  const segments = pathname.split("/");
+  const normalized = [];
+  for (let i = 0; i < segments.length; i++) {
+    normalized.push(__decodeRouteSegmentSafe(segments[i]));
+  }
+  return normalized.join("/");
+}
+function __normalizePathnameForRouteMatchStrict(pathname) {
+  const segments = pathname.split("/");
+  const normalized = [];
+  for (let i = 0; i < segments.length; i++) {
+    normalized.push(__decodeRouteSegment(segments[i]));
+  }
+  return normalized.join("/");
+}
+
 // ── Config pattern matching, redirects, rewrites, headers, CSRF validation,
 //    external URL proxy, cookie parsing, and request context are imported from
 //    config-matchers.ts and request-pipeline.ts (see import statements above).
@@ -15678,7 +15828,7 @@ export default async function handler(request, ctx) {
               if (__configHeaders.length) {
                 const url = new URL(request.url);
                 let pathname;
-                try { pathname = __normalizePath(decodeURIComponent(url.pathname)); } catch { pathname = url.pathname; }
+                try { pathname = __normalizePath(__normalizePathnameForRouteMatch(url.pathname)); } catch { pathname = url.pathname; }
                 
                 const extraHeaders = matchHeaders(pathname, __configHeaders, __reqCtx);
                 for (const h of extraHeaders) {
@@ -15727,11 +15877,11 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   const __protoGuard = guardProtocolRelativeUrl(url.pathname);
   if (__protoGuard) return __protoGuard;
 
-  // Decode percent-encoding and normalize pathname to canonical form.
-  // decodeURIComponent prevents /%61dmin from bypassing /admin matchers.
+  // Decode percent-encoding segment-wise and normalize pathname to canonical form.
+  // This preserves encoded path delimiters like %2F within a single segment.
   // __normalizePath collapses //foo///bar → /foo/bar, resolves . and .. segments.
   let decodedUrlPathname;
-  try { decodedUrlPathname = decodeURIComponent(url.pathname); } catch (e) {
+  try { decodedUrlPathname = __normalizePathnameForRouteMatchStrict(url.pathname); } catch (e) {
     return new Response("Bad Request", { status: 400 });
   }
   let pathname = __normalizePath(decodedUrlPathname);
@@ -16065,7 +16215,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
 
       // After the action, re-render the current page so the client
       // gets an updated React tree reflecting any mutations.
-      const match = matchRoute(cleanPathname, routes);
+      const match = matchRoute(cleanPathname);
       let element;
       if (match) {
         const { route: actionRoute, params: actionParams } = match;
@@ -16140,7 +16290,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     }
   }
 
-  let match = matchRoute(cleanPathname, routes);
+  let match = matchRoute(cleanPathname);
 
   // ── Fallback rewrites from next.config.js (if no route matched) ───────
   if (!match && __configRewrites.fallback && __configRewrites.fallback.length) {
@@ -16152,7 +16302,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         return proxyExternalRequest(request, __fallbackRewritten);
       }
       cleanPathname = __fallbackRewritten;
-      match = matchRoute(cleanPathname, routes);
+      match = matchRoute(cleanPathname);
     }
   }
 
@@ -16588,7 +16738,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       const sourceRoute = routes[intercept.sourceRouteIndex];
       if (sourceRoute && sourceRoute !== route) {
         // Render the source route (e.g. /feed) with the intercepting page in the slot
-        const sourceMatch = matchRoute(sourceRoute.pattern, routes);
+        const sourceMatch = matchRoute(sourceRoute.pattern);
         const sourceParams = sourceMatch ? sourceMatch.params : {};
         setNavigationContext({
           pathname: cleanPathname,
@@ -17730,6 +17880,7 @@ import { getSSRFontLinks as _getSSRFontLinks, getSSRFontStyles as _getSSRFontSty
 import { getSSRFontStyles as _getSSRFontStylesLocal, getSSRFontPreloads as _getSSRFontPreloadsLocal } from "next/font/local";
 import { parseCookies } from "<ROOT>/packages/vinext/src/config/config-matchers.js";
 import { runWithExecutionContext as _runWithExecutionContext, getRequestExecutionContext as _getRequestExecutionContext } from "<ROOT>/packages/vinext/src/shims/request-context.js";
+import { buildRouteTrie as _buildRouteTrie, trieMatch as _trieMatch } from "<ROOT>/packages/vinext/src/routing/route-trie.js";
 import * as _instrumentation from "<ROOT>/tests/fixtures/pages-basic/instrumentation.ts";
 import * as middlewareModule from "<ROOT>/tests/fixtures/pages-basic/middleware.ts";
 import { NextRequest, NextFetchEvent } from "next/server";
@@ -17810,6 +17961,16 @@ function isrCacheKey(router, pathname) {
   return prefix + ":__hash:" + fnv1a64(normalized);
 }
 
+function getMediaType(contentType) {
+  var type = (contentType || "text/plain").split(";")[0];
+  type = type && type.trim().toLowerCase();
+  return type || "text/plain";
+}
+
+function isJsonMediaType(mediaType) {
+  return mediaType === "application/json" || mediaType === "application/ld+json";
+}
+
 async function renderToStringAsync(element) {
   const stream = await renderToReadableStream(element);
   await stream.allReady;
@@ -17855,8 +18016,9 @@ import * as api_3 from "<ROOT>/tests/fixtures/pages-basic/pages/api/hello.ts";
 import * as api_4 from "<ROOT>/tests/fixtures/pages-basic/pages/api/instrumentation-test.ts";
 import * as api_5 from "<ROOT>/tests/fixtures/pages-basic/pages/api/middleware-test.ts";
 import * as api_6 from "<ROOT>/tests/fixtures/pages-basic/pages/api/no-content-type.ts";
-import * as api_7 from "<ROOT>/tests/fixtures/pages-basic/pages/api/send-buffer.ts";
-import * as api_8 from "<ROOT>/tests/fixtures/pages-basic/pages/api/users/[id].ts";
+import * as api_7 from "<ROOT>/tests/fixtures/pages-basic/pages/api/parse.ts";
+import * as api_8 from "<ROOT>/tests/fixtures/pages-basic/pages/api/send-buffer.ts";
+import * as api_9 from "<ROOT>/tests/fixtures/pages-basic/pages/api/users/[id].ts";
 
 import { default as AppComponent } from "<ROOT>/tests/fixtures/pages-basic/pages/_app.tsx";
 import { default as DocumentComponent } from "<ROOT>/tests/fixtures/pages-basic/pages/_document.tsx";
@@ -17895,6 +18057,7 @@ const pageRoutes = [
   { pattern: "/docs/:slug+", patternParts: ["docs",":slug+"], isDynamic: true, params: ["slug"], module: page_30, filePath: "<ROOT>/tests/fixtures/pages-basic/pages/docs/[...slug].tsx" },
   { pattern: "/sign-up/:sign-up*", patternParts: ["sign-up",":sign-up*"], isDynamic: true, params: ["sign-up"], module: page_31, filePath: "<ROOT>/tests/fixtures/pages-basic/pages/sign-up/[[...sign-up]]/index.tsx" }
 ];
+const _pageRouteTrie = _buildRouteTrie(pageRoutes);
 
 const apiRoutes = [
   { pattern: "/api/binary", patternParts: ["api","binary"], isDynamic: false, params: [], module: api_0 },
@@ -17904,9 +18067,11 @@ const apiRoutes = [
   { pattern: "/api/instrumentation-test", patternParts: ["api","instrumentation-test"], isDynamic: false, params: [], module: api_4 },
   { pattern: "/api/middleware-test", patternParts: ["api","middleware-test"], isDynamic: false, params: [], module: api_5 },
   { pattern: "/api/no-content-type", patternParts: ["api","no-content-type"], isDynamic: false, params: [], module: api_6 },
-  { pattern: "/api/send-buffer", patternParts: ["api","send-buffer"], isDynamic: false, params: [], module: api_7 },
-  { pattern: "/api/users/:id", patternParts: ["api","users",":id"], isDynamic: true, params: ["id"], module: api_8 }
+  { pattern: "/api/parse", patternParts: ["api","parse"], isDynamic: false, params: [], module: api_7 },
+  { pattern: "/api/send-buffer", patternParts: ["api","send-buffer"], isDynamic: false, params: [], module: api_8 },
+  { pattern: "/api/users/:id", patternParts: ["api","users",":id"], isDynamic: true, params: ["id"], module: api_9 }
 ];
+const _apiRouteTrie = _buildRouteTrie(apiRoutes);
 
 function matchRoute(url, routes) {
   const pathname = url.split("?")[0];
@@ -17914,40 +18079,8 @@ function matchRoute(url, routes) {
   // NOTE: Do NOT decodeURIComponent here. The pathname is already decoded at
   // the entry point. Decoding again would create a double-decode vector.
   const urlParts = normalizedUrl.split("/").filter(Boolean);
-  for (const route of routes) {
-    const params = matchPattern(urlParts, route.patternParts);
-    if (params !== null) return { route, params };
-  }
-  return null;
-}
-
-function matchPattern(urlParts, patternParts) {
-  const params = Object.create(null);
-  for (let i = 0; i < patternParts.length; i++) {
-    const pp = patternParts[i];
-    if (pp.endsWith("+")) {
-      if (i !== patternParts.length - 1) return null;
-      const paramName = pp.slice(1, -1);
-      const remaining = urlParts.slice(i);
-      if (remaining.length === 0) return null;
-      params[paramName] = remaining;
-      return params;
-    }
-    if (pp.endsWith("*")) {
-      if (i !== patternParts.length - 1) return null;
-      const paramName = pp.slice(1, -1);
-      params[paramName] = urlParts.slice(i);
-      return params;
-    }
-    if (pp.startsWith(":")) {
-      if (i >= urlParts.length) return null;
-      params[pp.slice(1)] = urlParts[i];
-      continue;
-    }
-    if (i >= urlParts.length || urlParts[i] !== pp) return null;
-  }
-  if (urlParts.length !== patternParts.length) return null;
-  return params;
+  const trie = routes === pageRoutes ? _pageRouteTrie : _apiRouteTrie;
+  return _trieMatch(trie, urlParts);
 }
 
 function parseQuery(url) {
@@ -18612,15 +18745,20 @@ export async function handleApiRoute(request, url) {
   }
   try {
     let body;
-    const ct = request.headers.get("content-type") || "";
+    const mediaType = getMediaType(request.headers.get("content-type"));
     let rawBody;
     try { rawBody = await readBodyWithLimit(request, 1 * 1024 * 1024); }
     catch { return new Response("Request body too large", { status: 413 }); }
     if (!rawBody) {
-      body = undefined;
-    } else if (ct.includes("application/json")) {
-      try { body = JSON.parse(rawBody); } catch { throw new ApiBodyParseError("Invalid JSON", 400); }
-    } else if (ct.includes("application/x-www-form-urlencoded")) {
+      body = isJsonMediaType(mediaType)
+        ? {}
+        : mediaType === "application/x-www-form-urlencoded"
+          ? decodeQueryString(rawBody)
+          : undefined;
+    } else if (isJsonMediaType(mediaType)) {
+      try { body = JSON.parse(rawBody); }
+      catch { throw new ApiBodyParseError("Invalid JSON", 400); }
+    } else if (mediaType === "application/x-www-form-urlencoded") {
       body = decodeQueryString(rawBody);
     } else {
       body = rawBody;
@@ -18634,7 +18772,7 @@ export async function handleApiRoute(request, url) {
     return await responsePromise;
   } catch (e) {
     if (e instanceof ApiBodyParseError) {
-      return new Response(e.message, { status: e.statusCode });
+      return new Response(e.message, { status: e.statusCode, statusText: e.message });
     }
     console.error("[vinext] API error:", e);
     return new Response("Internal Server Error", { status: 500 });
@@ -18666,6 +18804,32 @@ function __normalizePath(pathname) {
     else { resolved.push(seg); }
   }
   return "/" + resolved.join("/");
+}
+
+var __pathDelimiterRegex = /([/#?\\\\]|%(2f|23|3f|5c))/gi;
+function __decodeRouteSegment(segment) {
+  return decodeURIComponent(segment).replace(__pathDelimiterRegex, function (char) {
+    return encodeURIComponent(char);
+  });
+}
+function __decodeRouteSegmentSafe(segment) {
+  try { return __decodeRouteSegment(segment); } catch (e) { return segment; }
+}
+function __normalizePathnameForRouteMatch(pathname) {
+  var segments = pathname.split("/");
+  var normalized = [];
+  for (var i = 0; i < segments.length; i++) {
+    normalized.push(__decodeRouteSegmentSafe(segments[i]));
+  }
+  return normalized.join("/");
+}
+function __normalizePathnameForRouteMatchStrict(pathname) {
+  var segments = pathname.split("/");
+  var normalized = [];
+  for (var i = 0; i < segments.length; i++) {
+    normalized.push(__decodeRouteSegment(segments[i]));
+  }
+  return normalized.join("/");
 }
 
 function __isSafeRegex(pattern) {
@@ -18956,7 +19120,7 @@ async function _runMiddleware(request) {
   // Normalize pathname before matching to prevent path-confusion bypasses
   // (percent-encoding like /%61dmin, double slashes like /dashboard//settings).
   var decodedPathname;
-  try { decodedPathname = decodeURIComponent(url.pathname); } catch (e) {
+  try { decodedPathname = __normalizePathnameForRouteMatchStrict(url.pathname); } catch (e) {
     return { continue: false, response: new Response("Bad Request", { status: 400 }) };
   }
   var normalizedPathname = __normalizePath(decodedPathname);

@@ -2734,7 +2734,7 @@ describe("double-encoded path handling in middleware", () => {
       },
     ]);
     // Extract the matchRoute function from generated code
-    const matchRouteMatch = code.match(/function matchRoute\(url, routes\) \{[\s\S]*?\n\}/);
+    const matchRouteMatch = code.match(/function matchRoute\(url\) \{[\s\S]*?\n\}/);
     expect(matchRouteMatch).toBeTruthy();
     const matchRouteCode = matchRouteMatch![0];
     // Verify it does NOT call decodeURIComponent (the comment mentions it but
@@ -4950,7 +4950,7 @@ describe("proxyExternalRequest", () => {
     try {
       await proxyExternalRequest(request, "https://api.example.com/data");
       expect(capturedHeaders).toBeDefined();
-      // Credential headers must be forwarded (matching Next.js behavior)
+      // Credential headers must be forwarded to match Next.js external rewrite proxying.
       expect(capturedHeaders!.get("cookie")).toBe("session=secret123");
       expect(capturedHeaders!.get("authorization")).toBe("Bearer tok_secret");
       expect(capturedHeaders!.get("x-api-key")).toBe("sk_live_secret");
@@ -8162,6 +8162,24 @@ describe("handleImageOptimization", () => {
     });
     expect(response.status).toBe(200);
     expect(response.headers.get("Content-Disposition")).toBe("attachment");
+  });
+
+  it("defaults Content-Disposition to inline when contentDispositionType is invalid", async () => {
+    const { handleImageOptimization } =
+      await import("../packages/vinext/src/server/image-optimization.js");
+    const request = new Request("http://localhost/_vinext/image?url=%2Fimg.jpg&w=800");
+    const handlers = {
+      fetchAsset: async () =>
+        new Response("image-data", {
+          status: 200,
+          headers: { "Content-Type": "image/jpeg" },
+        }),
+    };
+    const response = await handleImageOptimization(request, handlers, undefined, {
+      contentDispositionType: "bogus" as "inline",
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Disposition")).toBe("inline");
   });
 
   it("applies custom contentSecurityPolicy", async () => {

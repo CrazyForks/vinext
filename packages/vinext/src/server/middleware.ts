@@ -31,6 +31,7 @@ import type { HasCondition, NextI18nConfig } from "../config/next-config.js";
 import { NextRequest, NextFetchEvent } from "../shims/server.js";
 import { normalizePath } from "./normalize-path.js";
 import { shouldKeepMiddlewareHeader } from "./middleware-request-headers.js";
+import { normalizePathnameForRouteMatchStrict } from "../routing/utils.js";
 
 /**
  * Determine whether a middleware/proxy file path refers to a proxy file.
@@ -372,7 +373,7 @@ export async function runMiddleware(
   // via percent-encoding (/%61dmin → /admin) or double slashes (/dashboard//settings).
   let decodedPathname: string;
   try {
-    decodedPathname = decodeURIComponent(url.pathname);
+    decodedPathname = normalizePathnameForRouteMatchStrict(url.pathname);
   } catch {
     // Malformed percent-encoding (e.g. /%E0%A4%A) — return 400 instead of throwing.
     return { continue: false, response: new Response("Bad Request", { status: 400 }) };

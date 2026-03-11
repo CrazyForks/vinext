@@ -16,6 +16,7 @@ import { createDirectRunner } from "./server/dev-module-runner.js";
 import { generateRscEntry } from "./entries/app-rsc-entry.js";
 import { generateSsrEntry } from "./entries/app-ssr-entry.js";
 import { generateBrowserEntry } from "./entries/app-browser-entry.js";
+import { normalizePathnameForRouteMatchStrict } from "./routing/utils.js";
 import {
   loadNextConfig,
   resolveNextConfig,
@@ -273,6 +274,13 @@ const POSTCSS_CONFIG_FILES = [
 ];
 
 /**
+ * Module-level cache for resolvePostcssStringPlugins — avoids re-scanning per Vite environment.
+ * Stores the Promise itself so concurrent calls (RSC/SSR/Client config() hooks firing in
+ * parallel) all await the same in-flight scan rather than each starting their own.
+ */
+const _postcssCache = new Map<string, Promise<{ plugins: any[] } | undefined>>();
+
+/**
  * Resolve PostCSS string plugin names in a project's PostCSS config.
  *
  * Next.js (via postcss-load-config) resolves string plugin names in the
@@ -284,7 +292,15 @@ const POSTCSS_CONFIG_FILES = [
  * Returns the resolved PostCSS config object to inject into Vite's
  * `css.postcss`, or `undefined` if no resolution is needed.
  */
-async function resolvePostcssStringPlugins(
+function resolvePostcssStringPlugins(projectRoot: string): Promise<{ plugins: any[] } | undefined> {
+  if (_postcssCache.has(projectRoot)) return _postcssCache.get(projectRoot)!;
+
+  const promise = _resolvePostcssStringPluginsUncached(projectRoot);
+  _postcssCache.set(projectRoot, promise);
+  return promise;
+}
+
+async function _resolvePostcssStringPluginsUncached(
   projectRoot: string,
 ): Promise<{ plugins: any[] } | undefined> {
   // Find the PostCSS config file
@@ -296,7 +312,9 @@ async function resolvePostcssStringPlugins(
       break;
     }
   }
-  if (!configPath) return undefined;
+  if (!configPath) {
+    return undefined;
+  }
 
   // Load the config file
   let config: any;
@@ -326,11 +344,15 @@ async function resolvePostcssStringPlugins(
 
   // Only process array-form plugins that contain string entries
   // (either bare strings or tuple form ["plugin-name", { options }])
-  if (!config || !Array.isArray(config.plugins)) return undefined;
+  if (!config || !Array.isArray(config.plugins)) {
+    return undefined;
+  }
   const hasStringPlugins = config.plugins.some(
     (p: any) => typeof p === "string" || (Array.isArray(p) && typeof p[0] === "string"),
   );
-  if (!hasStringPlugins) return undefined;
+  if (!hasStringPlugins) {
+    return undefined;
+  }
 
   // Resolve string plugin names to actual plugin functions
   const req = createRequire(path.join(projectRoot, "package.json"));
@@ -699,6 +721,12 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
 
   // Shim alias map — populated in config(), used by resolveId() for .js variants
   let nextShimMap: Record<string, string> = {};
+
+  // Build-only cache for og-inline-fetch-assets to avoid repeated file reads
+  // during a single production build. Dev mode skips the cache so asset edits
+  // are picked up without restarting the Vite server.
+  const _ogInlineCache = new Map<string, string>();
+  let _ogInlineIsBuild = false;
 
   /**
    * Generate the virtual SSR server entry module.
@@ -1305,6 +1333,10 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               consumer: "client",
               optimizeDeps: {
                 exclude: ["vinext"],
+                // Crawl app/ source files up front so client-only deps imported
+                // by user components are discovered during startup instead of
+                // triggering a late re-optimisation + full page reload.
+                entries: appEntries,
                 // React packages aren't crawled from app/ source files,
                 // so must be pre-included to avoid late discovery (#25).
                 include: [
@@ -1968,7 +2000,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               // decodeURIComponent prevents /%61dmin bypassing /admin matchers.
               // normalizePath collapses // and resolves . / .. segments.
               try {
-                pathname = normalizePath(decodeURIComponent(pathname));
+                pathname = normalizePath(normalizePathnameForRouteMatchStrict(pathname));
               } catch {
                 // Malformed percent-encoding (e.g. /%E0%A4%A) — return 400 instead of crashing.
                 res.writeHead(400);
@@ -2835,12 +2867,21 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
     {
       name: "vinext:og-inline-fetch-assets",
       enforce: "pre",
-      transform(code, id) {
+      configResolved(config) {
+        _ogInlineIsBuild = config.command === "build";
+      },
+      buildStart() {
+        if (_ogInlineIsBuild) {
+          _ogInlineCache.clear();
+        }
+      },
+      async transform(code, id) {
         // Quick bail-out: only process modules that use new URL(..., import.meta.url)
         if (!code.includes("import.meta.url")) {
           return null;
         }
 
+        const useCache = _ogInlineIsBuild;
         const moduleDir = path.dirname(id);
         let newCode = code;
         let didReplace = false;
@@ -2856,12 +2897,18 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             const relPath = match[2]; // e.g. "./noto-sans-v27-latin-regular.ttf"
             const absPath = path.resolve(moduleDir, relPath);
 
-            let fileBase64: string;
-            try {
-              fileBase64 = fs.readFileSync(absPath).toString("base64");
-            } catch {
-              // File not found on disk — skip (may be a runtime-only asset)
-              continue;
+            let fileBase64 = useCache ? _ogInlineCache.get(absPath) : undefined;
+            if (fileBase64 === undefined) {
+              try {
+                const buf = await fs.promises.readFile(absPath);
+                fileBase64 = buf.toString("base64");
+                if (useCache) {
+                  _ogInlineCache.set(absPath, fileBase64);
+                }
+              } catch {
+                // File not found on disk — skip (may be a runtime-only asset)
+                continue;
+              }
             }
 
             // Replace fetch(...).then(...) with an inline IIFE that returns Promise<ArrayBuffer>.
@@ -2892,12 +2939,18 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             const relPath = match[2]; // e.g. "./noto-sans-v27-latin-regular.ttf"
             const absPath = path.resolve(moduleDir, relPath);
 
-            let fileBase64: string;
-            try {
-              fileBase64 = fs.readFileSync(absPath).toString("base64");
-            } catch {
-              // File not found on disk — skip
-              continue;
+            let fileBase64 = useCache ? _ogInlineCache.get(absPath) : undefined;
+            if (fileBase64 === undefined) {
+              try {
+                const buf = await fs.promises.readFile(absPath);
+                fileBase64 = buf.toString("base64");
+                if (useCache) {
+                  _ogInlineCache.set(absPath, fileBase64);
+                }
+              } catch {
+                // File not found on disk — skip
+                continue;
+              }
             }
 
             // Replace readFileSync(...) with Buffer.from("<base64>", "base64").
@@ -3547,14 +3600,23 @@ function findFileWithExts(
   return null;
 }
 
+/** Module-level cache for hasMdxFiles — avoids re-scanning per Vite environment. */
+const _mdxScanCache = new Map<string, boolean>();
+
 /**
  * Check if the project has .mdx files in app/ or pages/ directories.
  */
 function hasMdxFiles(root: string, appDir: string | null, pagesDir: string | null): boolean {
+  const cacheKey = `${root}\0${appDir ?? ""}\0${pagesDir ?? ""}`;
+  if (_mdxScanCache.has(cacheKey)) return _mdxScanCache.get(cacheKey)!;
   const dirs = [appDir, pagesDir].filter(Boolean) as string[];
   for (const dir of dirs) {
-    if (fs.existsSync(dir) && scanDirForMdx(dir)) return true;
+    if (fs.existsSync(dir) && scanDirForMdx(dir)) {
+      _mdxScanCache.set(cacheKey, true);
+      return true;
+    }
   }
+  _mdxScanCache.set(cacheKey, false);
   return false;
 }
 
@@ -3592,6 +3654,9 @@ export type { NextConfig } from "./config/next-config.js";
 export { clientManualChunks, clientOutputConfig, clientTreeshakeConfig, computeLazyChunks };
 export { augmentSsrManifestFromBundle as _augmentSsrManifestFromBundle };
 export { resolvePostcssStringPlugins as _resolvePostcssStringPlugins };
+export { _postcssCache };
+export { hasMdxFiles as _hasMdxFiles };
+export { _mdxScanCache };
 export { parseStaticObjectLiteral as _parseStaticObjectLiteral };
 export { stripServerExports as _stripServerExports };
 export { asyncHooksStubPlugin as _asyncHooksStubPlugin };
