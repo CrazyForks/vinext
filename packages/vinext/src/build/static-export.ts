@@ -971,16 +971,14 @@ export async function runStaticExport(
     fs.mkdirSync(outDir, { recursive: true });
 
     // 5. Scan routes and run export
+    //
+    // Hybrid app/ + pages/ layout is supported: both routers run in sequence
+    // and their results are merged. App Router is exported first, then Pages
+    // Router. If both routers produce a file with the same relative path (e.g.
+    // both have an index route), the Pages Router file wins — it is written
+    // second and overwrites the App Router file on disk. A warning is emitted
+    // for each collision so the user can resolve the overlap.
     if (appDir) {
-      if (pagesDir) {
-        // Both app/ and pages/ detected. vinext currently only exports one
-        // router at a time. App Router takes precedence; pages/ is skipped.
-        // TODO: support hybrid app/+pages/ export in a future release.
-        console.warn(
-          "[vinext] Warning: both app/ and pages/ detected — only App Router will be exported. pages/ is skipped.",
-        );
-      }
-
       const addr = server.httpServer?.address();
       const port = typeof addr === "object" && addr ? addr.port : 0;
       if (port === 0) {
@@ -988,16 +986,57 @@ export async function runStaticExport(
       }
       const baseUrl = `http://localhost:${port}`;
 
-      const routes = await appRouter(appDir);
-      return await staticExportApp({
+      const appRoutes = await appRouter(appDir);
+      const appResult = await staticExportApp({
         baseUrl,
-        routes,
+        routes: appRoutes,
         server,
         outDir,
         config,
       });
+
+      if (!pagesDir) {
+        return appResult;
+      }
+
+      // Hybrid: also export the Pages Router into the same outDir.
+      const pageRoutes = await pagesRouter(pagesDir);
+      const apiRoutes = await apiRouter(pagesDir);
+      const pagesResult = await staticExportPages({
+        server,
+        routes: pageRoutes,
+        apiRoutes,
+        pagesDir,
+        outDir,
+        config,
+      });
+
+      // Detect file collisions (same relative path produced by both routers).
+      const appFilesSet = new Set(appResult.files);
+      const pagesFilesSet = new Set(pagesResult.files);
+      const collisionWarnings: string[] = [];
+      for (const f of pagesResult.files) {
+        if (appFilesSet.has(f)) {
+          collisionWarnings.push(
+            `[vinext] Hybrid export collision: both App Router and Pages Router produced "${f}" — Pages Router output takes precedence`,
+          );
+        }
+      }
+
+      return {
+        pageCount: appResult.pageCount + pagesResult.pageCount,
+        files: [
+          // Deduplicate: for colliding paths, pagesResult wins (it was written
+          // second, overwriting the app result file on disk). Emit only the
+          // de-duped union so the caller's file list matches what's on disk.
+          ...appResult.files.filter((f) => !pagesFilesSet.has(f)),
+          ...pagesResult.files,
+        ],
+        warnings: [...appResult.warnings, ...pagesResult.warnings, ...collisionWarnings],
+        errors: [...appResult.errors, ...pagesResult.errors],
+      };
     } else {
-      // Pages Router
+      // Pages Router only
       const routes = await pagesRouter(pagesDir!);
       const apiRoutes = await apiRouter(pagesDir!);
       return await staticExportPages({
