@@ -340,8 +340,13 @@ function resolvePrerenderedHtml(dir: string, pathname: string): string | null {
     return directPath;
   }
 
+  // For the root path "/" the only valid pre-rendered file is index.html
+  // (handled by directPath above). The indexPath branch would look for
+  // index/index.html which is never written — short-circuit here to avoid
+  // two unnecessary fs syscalls on every root request.
+  if (pathname === "/") return null;
+
   // trailingSlash:true → written as <normalized>/index.html
-  // (Not reachable for pathname === "/" — see note above.)
   const indexPath = path.join(dir, normalized, "index.html");
   if (
     path.resolve(indexPath).startsWith(resolvedDir + path.sep) &&

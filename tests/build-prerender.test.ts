@@ -17,6 +17,12 @@ const PAGES_FIXTURE = path.resolve(import.meta.dirname, "./fixtures/pages-basic"
 const outDir = path.resolve(PAGES_FIXTURE, "dist");
 const serverEntryPath = path.join(outDir, "server", "entry.js");
 const fixtureBuilt = fs.existsSync(serverEntryPath);
+if (!fixtureBuilt) {
+  console.warn(
+    `[build-prerender] fixture not built — skipping production-server tests. ` +
+      `Run \`pnpm build\` inside ${PAGES_FIXTURE} to enable them.`,
+  );
+}
 
 describe.skipIf(!fixtureBuilt)("Production server — serves pre-rendered HTML", () => {
   const pagesDir = path.join(outDir, "server", "pages");

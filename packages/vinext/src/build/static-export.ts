@@ -585,6 +585,8 @@ function buildUrlFromParams(pattern: string, params: Record<string, string | str
  */
 export function getOutputPath(urlPath: string, trailingSlash: boolean, outDir: string): string {
   if (urlPath === "/") {
+    // Root always maps to "index.html" — no traversal possible, no need
+    // to run the boundary check below.
     return "index.html";
   }
 
@@ -970,6 +972,15 @@ export async function runStaticExport(
 
     // 5. Scan routes and run export
     if (appDir) {
+      if (pagesDir) {
+        // Both app/ and pages/ detected. vinext currently only exports one
+        // router at a time. App Router takes precedence; pages/ is skipped.
+        // TODO: support hybrid app/+pages/ export in a future release.
+        console.warn(
+          "[vinext] Warning: both app/ and pages/ detected — only App Router will be exported. pages/ is skipped.",
+        );
+      }
+
       const addr = server.httpServer?.address();
       const port = typeof addr === "object" && addr ? addr.port : 0;
       if (port === 0) {
@@ -1138,8 +1149,9 @@ export async function prerenderStaticPages(options: PrerenderOptions): Promise<P
 
         result.files.push(outputPath);
         result.pageCount++;
-      } catch {
-        result.skipped.push(urlPath);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        result.skipped.push(`${urlPath} (error: ${msg})`);
       } finally {
         clearTimeout(timer);
       }
@@ -1187,8 +1199,11 @@ async function collectStaticRoutesFromSource(root: string): Promise<CollectedRou
   // ISR: getStaticProps returning { revalidate } means the page needs
   // periodic regeneration. Pre-rendering it with s-maxage=31536000 would
   // pin the CDN cache for a year regardless of the revalidate interval.
-  // Detect any `revalidate:` or `revalidate :` key in the source and skip.
-  const isrPattern = /\brevalidate\s*:/;
+  // Detect `revalidate:` (object key), `revalidate,` / `revalidate}` (shorthand
+  // property in destructuring or object literal), and `revalidate` at end-of-line.
+  // The [\s,}] trailer catches shorthand syntax like `return { revalidate }` or
+  // `const { revalidate } = ...` where there is no colon.
+  const isrPattern = /\brevalidate\s*[:\s,}]/;
 
   for (const route of routes) {
     const routeName = path.basename(route.filePath, path.extname(route.filePath));
