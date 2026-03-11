@@ -24,6 +24,17 @@ if (!fixtureBuilt) {
   );
 }
 
+// Sentinel: fail loudly in CI when the fixture hasn't been built instead of
+// silently passing an empty suite. The skipIf block above is for local dev
+// convenience only — CI must always build the fixture before running this file.
+it("fixture must be built before running pre-render tests", () => {
+  if (!fixtureBuilt) {
+    throw new Error(
+      `Pre-render fixture not built. Run \`pnpm build\` inside ${PAGES_FIXTURE} before running this test file.`,
+    );
+  }
+});
+
 describe.skipIf(!fixtureBuilt)("Production server — serves pre-rendered HTML", () => {
   const pagesDir = path.join(outDir, "server", "pages");
   const prerenderedFile = path.join(pagesDir, "prerendered-test.html");

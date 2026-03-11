@@ -58,11 +58,10 @@ async function createTempViteServer(
   const server = await vite.createServer({
     root,
     configFile: false,
-    // appDir: root passes the project root as the base directory. The
-    // vinext plugin treats appDir as an override for baseDir (it auto-appends
-    // "app/" when resolving routes), so passing root is equivalent to omitting
-    // the option. It is kept explicit here so future readers know it was a
-    // deliberate choice, not an accidental misconfiguration.
+    // Pass appDir so the plugin resolves app/ relative to the project being
+    // exported, not process.cwd(). Omitting it causes the plugin to fall back
+    // to process.cwd() for early app-dir detection, which points to the
+    // monorepo/CLI root rather than the fixture directory.
     plugins: [vinextPlugin({ appDir: root })],
     optimizeDeps: { holdUntilCrawlEnd: true },
     server: { port: 0, cors: false },
@@ -384,7 +383,7 @@ async function renderStaticPage(options: RenderStaticPageOptions): Promise<strin
     // is vinext's internal format and is not understood by next/router.
     const nextDataScript = `<script>window.__NEXT_DATA__ = ${safeJsonStringify({
       props: { pageProps },
-      page: patternToNextPage(route.pattern),
+      page: patternToNextFormat(route.pattern),
       query: params,
       buildId: _config.buildId,
     })}</script>`;
@@ -501,40 +500,6 @@ async function renderErrorPage(options: RenderErrorPageOptions): Promise<string 
   }
 
   return null;
-}
-
-/**
- * Convert a colon-parameterised route pattern (vinext internal format) to
- * Next.js bracket notation for use in __NEXT_DATA__.page.
- *
- * The Next.js client-side router uses the `page` field in __NEXT_DATA__ to
- * match routes during hydration. It expects bracket notation (`[slug]`), not
- * colon notation (`:slug`). Using the wrong format causes useRouter().query
- * to return an empty object for dynamic pre-rendered pages.
- *
- * E.g.  "/blog/:slug"   → "/blog/[slug]"
- *       "/docs/:slug+"  → "/docs/[...slug]"
- *       "/docs/:slug*"  → "/docs/[[...slug]]"
- */
-function patternToNextPage(pattern: string): string {
-  return pattern
-    .split("/")
-    .map((part) => {
-      if (part.endsWith("*") && part.startsWith(":")) {
-        // Optional catch-all: :slug* → [[...slug]]
-        return `[[...${part.slice(1, -1)}]]`;
-      }
-      if (part.endsWith("+") && part.startsWith(":")) {
-        // Required catch-all: :slug+ → [...slug]
-        return `[...${part.slice(1, -1)}]`;
-      }
-      if (part.startsWith(":")) {
-        // Regular dynamic segment: :id → [id]
-        return `[${part.slice(1)}]`;
-      }
-      return part;
-    })
-    .join("/");
 }
 
 /**
@@ -1235,6 +1200,12 @@ async function collectStaticRoutesFromSource(root: string): Promise<CollectedRou
     /export\s+(async\s+)?function\s+getServerSideProps|export\s+(const|let|var)\s+getServerSideProps/;
   // Re-exported getServerSideProps: `export { getServerSideProps } from ...`
   const gsspReExportPattern = /export\s*\{[^}]*\bgetServerSideProps\b[^}]*\}/;
+  // Re-exported getStaticProps: `export { getStaticProps } from './data-layer'`
+  // We cannot inspect the re-exported function to determine whether it returns
+  // `revalidate`, so conservatively skip these pages to avoid pinning ISR pages
+  // with a year-long Cache-Control. False positive: valid static pages that
+  // happen to re-export getStaticProps without revalidate will be skipped (safe).
+  const gspReExportPattern = /export\s*\{[^}]*\bgetStaticProps\b[^}]*\}/;
   // ISR: getStaticProps returning { revalidate } means the page needs
   // periodic regeneration. Pre-rendering it with s-maxage=31536000 would
   // pin the CDN cache for a year regardless of the revalidate interval.
@@ -1242,6 +1213,12 @@ async function collectStaticRoutesFromSource(root: string): Promise<CollectedRou
   // property in destructuring or object literal), and `revalidate` at end-of-line.
   // The [\s,}] trailer catches shorthand syntax like `return { revalidate }` or
   // `const { revalidate } = ...` where there is no colon.
+  // Known false positives (page skipped safely): TypeScript type annotations
+  // (`type T = { revalidate: number }`), interface definitions, comments.
+  // Known false negatives (page pre-rendered with wrong cache): variable-based
+  // revalidate where getStaticProps is re-exported from another module (covered
+  // above by gspReExportPattern) — inline `const HOUR = 3600; return { revalidate: HOUR }`
+  // does match via `revalidate:` so is correctly detected.
   const isrPattern = /\brevalidate\s*[:\s,}]/;
 
   for (const route of routes) {
@@ -1258,6 +1235,11 @@ async function collectStaticRoutesFromSource(root: string): Promise<CollectedRou
 
       if (gsspPattern.test(source) || gsspReExportPattern.test(source)) {
         skipped.push(`${route.pattern} (getServerSideProps)`);
+        continue;
+      }
+
+      if (gspReExportPattern.test(source)) {
+        skipped.push(`${route.pattern} (re-exported getStaticProps — may include revalidate)`);
         continue;
       }
 
