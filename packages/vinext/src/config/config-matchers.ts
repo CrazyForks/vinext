@@ -51,6 +51,15 @@ const _compiledHeaderSourceCache = new Map<string, RegExp | null>();
 const _compiledConditionCache = new Map<string, RegExp | null>();
 
 /**
+ * Cache for destination substitution regexes in substituteDestinationParams.
+ *
+ * The regex depends only on the set of param keys captured from the matched
+ * source pattern. Caching by sorted key list avoids recompiling a new RegExp
+ * for repeated redirect/rewrite calls that use the same param shape.
+ */
+const _compiledDestinationParamCache = new Map<string, RegExp>();
+
+/**
  * Redirect index for O(1) locale-static rule lookup.
  *
  * Many Next.js apps generate 50-100 redirect rules of the form:
@@ -773,8 +782,9 @@ export function matchRedirect(
           if (!checkHasConditions(redirect.has, redirect.missing, ctx)) continue;
         }
         // Locale was omitted (the `?` made it optional) — param value is "".
-        let dest = redirect.destination;
-        dest = dest.replace(`:${entry.paramName}`, "");
+        let dest = substituteDestinationParams(redirect.destination, {
+          [entry.paramName]: "",
+        });
         dest = sanitizeDestination(dest);
         localeMatch = { destination: dest, permanent: redirect.permanent };
         localeMatchIndex = entry.originalIndex;
@@ -799,8 +809,9 @@ export function matchRedirect(
           if (redirect.has || redirect.missing) {
             if (!checkHasConditions(redirect.has, redirect.missing, ctx)) continue;
           }
-          let dest = redirect.destination;
-          dest = dest.replace(`:${entry.paramName}`, localePart);
+          let dest = substituteDestinationParams(redirect.destination, {
+            [entry.paramName]: localePart,
+          });
           dest = sanitizeDestination(dest);
           localeMatch = { destination: dest, permanent: redirect.permanent };
           localeMatchIndex = entry.originalIndex;
@@ -827,14 +838,7 @@ export function matchRedirect(
           continue;
         }
       }
-      let dest = redirect.destination;
-      for (const [key, value] of Object.entries(params)) {
-        // Replace :param*, :param+, and :param forms in the destination.
-        // The catch-all suffixes (* and +) must be stripped along with the param name.
-        dest = dest.replace(`:${key}*`, value);
-        dest = dest.replace(`:${key}+`, value);
-        dest = dest.replace(`:${key}`, value);
-      }
+      let dest = substituteDestinationParams(redirect.destination, params);
       // Collapse protocol-relative URLs (e.g. //evil.com from decoded %2F in catch-all params).
       dest = sanitizeDestination(dest);
       return { destination: dest, permanent: redirect.permanent };
@@ -866,20 +870,42 @@ export function matchRewrite(
           continue;
         }
       }
-      let dest = rewrite.destination;
-      for (const [key, value] of Object.entries(params)) {
-        // Replace :param*, :param+, and :param forms in the destination.
-        // The catch-all suffixes (* and +) must be stripped along with the param name.
-        dest = dest.replace(`:${key}*`, value);
-        dest = dest.replace(`:${key}+`, value);
-        dest = dest.replace(`:${key}`, value);
-      }
+      let dest = substituteDestinationParams(rewrite.destination, params);
       // Collapse protocol-relative URLs (e.g. //evil.com from decoded %2F in catch-all params).
       dest = sanitizeDestination(dest);
       return dest;
     }
   }
   return null;
+}
+
+/**
+ * Substitute all matched route params into a redirect/rewrite destination.
+ *
+ * Handles repeated params (e.g. `/api/:id/:id`) and catch-all suffix forms
+ * (`:path*`, `:path+`) in a single pass. Unknown params are left intact.
+ */
+function substituteDestinationParams(destination: string, params: Record<string, string>): string {
+  const keys = Object.keys(params);
+  if (keys.length === 0) return destination;
+
+  // Match only the concrete param keys captured from the source pattern.
+  // Sorting longest-first ensures hyphenated names like `auth-method`
+  // win over shorter prefixes like `auth`. The negative lookahead keeps
+  // alphanumeric/underscore suffixes attached, while allowing `-` to act
+  // as a literal delimiter in destinations like `:year-:month`.
+  const sortedKeys = [...keys].sort((a, b) => b.length - a.length);
+  const cacheKey = sortedKeys.join("\0");
+  let paramRe = _compiledDestinationParamCache.get(cacheKey);
+  if (!paramRe) {
+    const paramAlternation = sortedKeys
+      .map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      .join("|");
+    paramRe = new RegExp(`:(${paramAlternation})([+*])?(?![A-Za-z0-9_])`, "g");
+    _compiledDestinationParamCache.set(cacheKey, paramRe);
+  }
+
+  return destination.replace(paramRe, (_token, key: string) => params[key]);
 }
 
 /**
@@ -931,13 +957,14 @@ export async function proxyExternalRequest(
   // Build the full external URL, preserving query parameters from the original request
   const originalUrl = new URL(request.url);
   const targetUrl = new URL(externalUrl);
+  const destinationKeys = new Set(targetUrl.searchParams.keys());
 
   // If the rewrite destination already has query params, merge them.
   // Destination params take precedence — original request params are only added
   // when the destination doesn't already specify that key.
   for (const [key, value] of originalUrl.searchParams) {
-    if (!targetUrl.searchParams.has(key)) {
-      targetUrl.searchParams.set(key, value);
+    if (!destinationKeys.has(key)) {
+      targetUrl.searchParams.append(key, value);
     }
   }
 

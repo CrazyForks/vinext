@@ -19,7 +19,7 @@
  *   - Dynamic routes without generateStaticParams → warning, skipped
  */
 import type { ViteDevServer } from "vite";
-import type { Route } from "../routing/pages-router.js";
+import { patternToNextFormat, type Route } from "../routing/pages-router.js";
 import type { AppRoute } from "../routing/app-router.js";
 import {
   loadNextConfig,
@@ -319,7 +319,7 @@ async function renderStaticPage(options: RenderStaticPageOptions): Promise<strin
   // Set SSR context for router shim
   if (typeof routerShim.setSSRContext === "function") {
     routerShim.setSSRContext({
-      pathname: urlPath,
+      pathname: patternToNextFormat(route.pattern),
       query: params,
       asPath: urlPath,
     });

@@ -17,6 +17,7 @@ import {
   getRevalidateDuration,
   triggerBackgroundRegeneration,
 } from "../packages/vinext/src/server/isr-cache.js";
+import { runWithExecutionContext } from "../packages/vinext/src/shims/request-context.js";
 
 // ─── isrCacheKey ────────────────────────────────────────────────────────
 
@@ -65,6 +66,33 @@ describe("isrCacheKey", () => {
     const path1 = "/" + "a".repeat(250);
     const path2 = "/" + "b".repeat(250);
     expect(isrCacheKey("pages", path1)).not.toBe(isrCacheKey("pages", path2));
+  });
+
+  it("includes buildId in key when provided", () => {
+    expect(isrCacheKey("pages", "/about", "abc123")).toBe("pages:abc123:/about");
+  });
+
+  it("includes buildId in app router key", () => {
+    expect(isrCacheKey("app", "/dashboard", "build-42")).toBe("app:build-42:/dashboard");
+  });
+
+  it("preserves root with buildId", () => {
+    expect(isrCacheKey("pages", "/", "v1")).toBe("pages:v1:/");
+  });
+
+  it("strips trailing slash with buildId", () => {
+    expect(isrCacheKey("pages", "/about/", "v1")).toBe("pages:v1:/about");
+  });
+
+  it("hashes long paths with buildId", () => {
+    const longPath = "/" + "a".repeat(250);
+    const key = isrCacheKey("pages", longPath, "build-99");
+    expect(key).toMatch(/^pages:build-99:__hash:/);
+  });
+
+  it("without buildId format is unchanged (backward compat)", () => {
+    expect(isrCacheKey("pages", "/about")).toBe("pages:/about");
+    expect(isrCacheKey("app", "/dashboard")).toBe("app:/dashboard");
   });
 });
 
@@ -210,7 +238,7 @@ describe("triggerBackgroundRegeneration", () => {
     expect(renderFnB).toHaveBeenCalledOnce();
   });
 
-  it("calls ctx.waitUntil with the regen promise when ctx is provided", async () => {
+  it("calls ctx.waitUntil with the regen promise when ctx is in ALS", async () => {
     const waitUntil = vi.fn();
     const ctx = { waitUntil };
 
@@ -220,7 +248,9 @@ describe("triggerBackgroundRegeneration", () => {
     });
     const renderFn = vi.fn().mockReturnValue(renderPromise);
 
-    triggerBackgroundRegeneration("regen-ctx-1", renderFn, ctx);
+    await runWithExecutionContext(ctx, async () => {
+      triggerBackgroundRegeneration("regen-ctx-1", renderFn);
+    });
 
     expect(waitUntil).toHaveBeenCalledOnce();
     expect(waitUntil).toHaveBeenCalledWith(expect.any(Promise));

@@ -1,7 +1,9 @@
 declare module "next/link" {
   import type { ComponentType, AnchorHTMLAttributes, ReactNode } from "react";
+  type UrlQueryValue = string | number | boolean | null | undefined;
+  type UrlQuery = Record<string, UrlQueryValue | readonly UrlQueryValue[]>;
   interface LinkProps extends Omit<AnchorHTMLAttributes<HTMLAnchorElement>, "href"> {
-    href: string | { pathname?: string; query?: Record<string, string> };
+    href: string | { pathname?: string; query?: UrlQuery };
     as?: string;
     replace?: boolean;
     prefetch?: boolean;
@@ -14,7 +16,13 @@ declare module "next/link" {
 
 declare module "next/navigation" {
   export function usePathname(): string;
-  export function useSearchParams(): URLSearchParams;
+  export class ReadonlyURLSearchParams extends URLSearchParams {
+    append(name: string, value: string): never;
+    delete(name: string, value?: string): never;
+    set(name: string, value: string): never;
+    sort(): never;
+  }
+  export function useSearchParams(): ReadonlyURLSearchParams;
   export function useParams<T = Record<string, string | string[]>>(): T;
   export function useRouter(): {
     push(href: string, options?: { scroll?: boolean }): void;

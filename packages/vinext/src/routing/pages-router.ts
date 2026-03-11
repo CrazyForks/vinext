@@ -5,6 +5,7 @@ import {
   scanWithExtensions,
   type ValidFileMatcher,
 } from "./file-matcher.js";
+import { patternToNextFormat, validateRoutePatterns } from "./route-validation.js";
 
 export interface Route {
   /** URL pattern, e.g. "/" or "/about" or "/posts/:id" */
@@ -76,6 +77,8 @@ async function scanPageRoutes(pagesDir: string, matcher: ValidFileMatcher): Prom
     const route = fileToRoute(file, pagesDir, matcher);
     if (route) routes.push(route);
   }
+
+  validateRoutePatterns(routes.map((route) => route.pattern));
 
   // Sort: static routes first, then dynamic, then catch-all
   routes.sort(compareRoutes);
@@ -229,6 +232,8 @@ async function scanApiRoutes(pagesDir: string, matcher: ValidFileMatcher): Promi
     }
   }
 
+  validateRoutePatterns(routes.map((route) => route.pattern));
+
   // Sort same as page routes
   routes.sort(compareRoutes);
 
@@ -286,9 +291,4 @@ function matchPattern(
  * to Next.js bracket format (e.g., "/posts/[id]", "/docs/[...slug]").
  * Used for __NEXT_DATA__.page which apps expect in Next.js format.
  */
-export function patternToNextFormat(pattern: string): string {
-  return pattern
-    .replace(/:([\w-]+)\*/g, "[[...$1]]") // optional catch-all :slug* -> [[...slug]]
-    .replace(/:([\w-]+)\+/g, "[...$1]") // catch-all :slug+ -> [...slug]
-    .replace(/:([\w-]+)/g, "[$1]"); // dynamic :id -> [id]
-}
+export { patternToNextFormat } from "./route-validation.js";

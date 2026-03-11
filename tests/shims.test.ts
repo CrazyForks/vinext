@@ -4820,6 +4820,60 @@ describe("proxyExternalRequest", () => {
     }
   });
 
+  it("preserves repeated original query params when the destination does not define that key", async () => {
+    const { proxyExternalRequest } =
+      await import("../packages/vinext/src/config/config-matchers.js");
+
+    const request = new Request("http://localhost:3000/test?a=1&a=2&b=3", {
+      method: "GET",
+    });
+
+    const originalFetch = globalThis.fetch;
+    let capturedEntries: Array<[string, string]> | undefined;
+    globalThis.fetch = async (url: any, _init: any) => {
+      capturedEntries = [...new URL(typeof url === "string" ? url : url.toString()).searchParams];
+      return new Response("ok", { status: 200 });
+    };
+
+    try {
+      await proxyExternalRequest(request, "https://api.example.com/v1");
+      expect(capturedEntries).toEqual([
+        ["a", "1"],
+        ["a", "2"],
+        ["b", "3"],
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("keeps destination query params authoritative while preserving repeated values for other keys", async () => {
+    const { proxyExternalRequest } =
+      await import("../packages/vinext/src/config/config-matchers.js");
+
+    const request = new Request("http://localhost:3000/test?a=1&a=2&b=3&b=4", {
+      method: "GET",
+    });
+
+    const originalFetch = globalThis.fetch;
+    let capturedEntries: Array<[string, string]> | undefined;
+    globalThis.fetch = async (url: any, _init: any) => {
+      capturedEntries = [...new URL(typeof url === "string" ? url : url.toString()).searchParams];
+      return new Response("ok", { status: 200 });
+    };
+
+    try {
+      await proxyExternalRequest(request, "https://api.example.com/v1?a=dest");
+      expect(capturedEntries).toEqual([
+        ["a", "dest"],
+        ["b", "3"],
+        ["b", "4"],
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("strips hop-by-hop headers from upstream response", async () => {
     const { proxyExternalRequest } =
       await import("../packages/vinext/src/config/config-matchers.js");
@@ -5011,6 +5065,72 @@ describe("matchRewrite with external URLs", () => {
     const result = matchRewrite("/posts/hello", rewrites, emptyCtx);
     expect(result).toBe("/blog/hello");
     expect(isExternalUrl(result!)).toBe(false);
+  });
+
+  it("replaces repeated params in rewrite destinations", async () => {
+    const { matchRewrite } = await import("../packages/vinext/src/config/config-matchers.js");
+    const rewrites = [{ source: "/post/:id", destination: "/api/:id/:id" }];
+    const result = matchRewrite("/post/123", rewrites, emptyCtx);
+    expect(result).toBe("/api/123/123");
+  });
+
+  it("replaces adjacent params separated by literal characters", async () => {
+    const { matchRewrite } = await import("../packages/vinext/src/config/config-matchers.js");
+    const rewrites = [{ source: "/legacy/:year/:month", destination: "/archive/:year-:month" }];
+    const result = matchRewrite("/legacy/2024/06", rewrites, emptyCtx);
+    expect(result).toBe("/archive/2024-06");
+  });
+
+  it("replaces hyphenated param names without truncating them", async () => {
+    const { matchRewrite } = await import("../packages/vinext/src/config/config-matchers.js");
+    const rewrites = [{ source: "/auth/:auth-method", destination: "/signin/:auth-method" }];
+    const result = matchRewrite("/auth/google", rewrites, emptyCtx);
+    expect(result).toBe("/signin/google");
+  });
+
+  it("treats hyphen as a literal delimiter when only the shorter param key exists", async () => {
+    const { matchRewrite } = await import("../packages/vinext/src/config/config-matchers.js");
+    const rewrites = [{ source: "/item/:foo", destination: "/dest/:foo-bar" }];
+    const result = matchRewrite("/item/123", rewrites, emptyCtx);
+    expect(result).toBe("/dest/123-bar");
+  });
+});
+
+describe("matchRedirect destination param substitution", () => {
+  const emptyCtx = {
+    headers: new Headers(),
+    cookies: {},
+    query: new URLSearchParams(),
+    host: "localhost",
+  };
+
+  it("replaces repeated params in redirect destinations", async () => {
+    const { matchRedirect } = await import("../packages/vinext/src/config/config-matchers.js");
+    const redirects = [{ source: "/post/:id", destination: "/api/:id/:id", permanent: false }];
+    const result = matchRedirect("/post/123", redirects, emptyCtx);
+    expect(result).toEqual({ destination: "/api/123/123", permanent: false });
+  });
+
+  it("replaces adjacent params separated by literal characters in redirect destinations", async () => {
+    const { matchRedirect } = await import("../packages/vinext/src/config/config-matchers.js");
+    const redirects = [
+      { source: "/legacy/:year/:month", destination: "/archive/:year-:month", permanent: true },
+    ];
+    const result = matchRedirect("/legacy/2024/06", redirects, emptyCtx);
+    expect(result).toEqual({ destination: "/archive/2024-06", permanent: true });
+  });
+
+  it("replaces repeated locale params in locale-static redirect destinations", async () => {
+    const { matchRedirect } = await import("../packages/vinext/src/config/config-matchers.js");
+    const redirects = [
+      {
+        source: "/:locale(en|fr)?/docs",
+        destination: "/:locale/:locale/docs",
+        permanent: false,
+      },
+    ];
+    const result = matchRedirect("/en/docs", redirects, emptyCtx);
+    expect(result).toEqual({ destination: "/en/en/docs", permanent: false });
   });
 });
 
@@ -6429,12 +6549,313 @@ describe("next/compat/router shim", () => {
     expect((captured as any).asPath).toBe("/posts/42?tab=comments");
     expect((captured as any).query.id).toBe("42");
   });
+
+  it("preserves array query values from SSR context", async () => {
+    const React = await import("react");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { useRouter: useCompatRouter } =
+      await import("../packages/vinext/src/shims/compat-router.js");
+    const { wrapWithRouterContext, setSSRContext } =
+      await import("../packages/vinext/src/shims/router.js");
+
+    setSSRContext({
+      pathname: "/docs/a/b",
+      query: { slug: ["a", "b"] },
+      asPath: "/docs/a/b",
+    });
+
+    let captured: unknown = "NOT_SET";
+    function Probe() {
+      captured = useCompatRouter();
+      return React.createElement("div", null, "probe");
+    }
+
+    const element = wrapWithRouterContext(React.createElement(Probe));
+    renderToStaticMarkup(element);
+
+    setSSRContext(null);
+
+    expect(captured).not.toBeNull();
+    expect((captured as any).query.slug).toEqual(["a", "b"]);
+  });
+
+  it("preserves route param arrays, repeated search params, and hash in client router state", async () => {
+    const React = await import("react");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { useRouter: useCompatRouter } =
+      await import("../packages/vinext/src/shims/compat-router.js");
+    const { wrapWithRouterContext } = await import("../packages/vinext/src/shims/router.js");
+
+    const previousWindow = (globalThis as any).window;
+    (globalThis as any).window = {
+      location: {
+        pathname: "/docs/a/b",
+        search: "?tag=a&tag=b",
+        hash: "#section",
+      },
+      __NEXT_DATA__: {
+        page: "/docs/[...slug]",
+        query: { slug: ["a", "b"] },
+        isFallback: false,
+      },
+      __VINEXT_LOCALE__: undefined,
+      __VINEXT_LOCALES__: undefined,
+      __VINEXT_DEFAULT_LOCALE__: undefined,
+    };
+
+    try {
+      let captured: unknown = "NOT_SET";
+      function Probe() {
+        captured = useCompatRouter();
+        return React.createElement("div", null, "probe");
+      }
+
+      const element = wrapWithRouterContext(React.createElement(Probe));
+      renderToStaticMarkup(element);
+
+      expect(captured).not.toBeNull();
+      expect((captured as any).query.slug).toEqual(["a", "b"]);
+      expect((captured as any).query.tag).toEqual(["a", "b"]);
+      expect((captured as any).asPath).toBe("/docs/a/b?tag=a&tag=b#section");
+    } finally {
+      if (previousWindow === undefined) {
+        delete (globalThis as any).window;
+      } else {
+        (globalThis as any).window = previousWindow;
+      }
+    }
+  });
+
+  it("prefers dynamic route params over same-key search params in client router state", async () => {
+    const React = await import("react");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { useRouter: useCompatRouter } =
+      await import("../packages/vinext/src/shims/compat-router.js");
+    const { wrapWithRouterContext } = await import("../packages/vinext/src/shims/router.js");
+
+    const previousWindow = (globalThis as any).window;
+    (globalThis as any).window = {
+      location: {
+        pathname: "/docs/a/b",
+        search: "?slug=c",
+        hash: "",
+      },
+      __NEXT_DATA__: {
+        page: "/docs/[...slug]",
+        query: { slug: ["a", "b"] },
+        isFallback: false,
+      },
+      __VINEXT_LOCALE__: undefined,
+      __VINEXT_LOCALES__: undefined,
+      __VINEXT_DEFAULT_LOCALE__: undefined,
+    };
+
+    try {
+      let captured: unknown = "NOT_SET";
+      function Probe() {
+        captured = useCompatRouter();
+        return React.createElement("div", null, "probe");
+      }
+
+      const element = wrapWithRouterContext(React.createElement(Probe));
+      renderToStaticMarkup(element);
+
+      expect(captured).not.toBeNull();
+      expect((captured as any).query.slug).toEqual(["a", "b"]);
+      expect((captured as any).asPath).toBe("/docs/a/b?slug=c");
+    } finally {
+      if (previousWindow === undefined) {
+        delete (globalThis as any).window;
+      } else {
+        (globalThis as any).window = previousWindow;
+      }
+    }
+  });
+
+  it("treats prototype property names as ordinary query keys in client router state", async () => {
+    const React = await import("react");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { useRouter: useCompatRouter } =
+      await import("../packages/vinext/src/shims/compat-router.js");
+    const { wrapWithRouterContext } = await import("../packages/vinext/src/shims/router.js");
+
+    const previousWindow = (globalThis as any).window;
+    (globalThis as any).window = {
+      location: {
+        pathname: "/shallow-test",
+        search: "?toString=a&constructor=b&__proto__=c",
+        hash: "",
+      },
+      __NEXT_DATA__: {
+        page: "/shallow-test",
+        query: {},
+        isFallback: false,
+      },
+      __VINEXT_LOCALE__: undefined,
+      __VINEXT_LOCALES__: undefined,
+      __VINEXT_DEFAULT_LOCALE__: undefined,
+    };
+
+    try {
+      let captured: unknown = "NOT_SET";
+      function Probe() {
+        captured = useCompatRouter();
+        return React.createElement("div", null, "probe");
+      }
+
+      const element = wrapWithRouterContext(React.createElement(Probe));
+      renderToStaticMarkup(element);
+
+      expect(captured).not.toBeNull();
+      expect((captured as any).query.toString).toBe("a");
+      expect((captured as any).query.constructor).toBe("b");
+      expect((captured as any).query.__proto__).toBe("c");
+      expect(Object.getPrototypeOf((captured as any).query)).toBe(Object.prototype);
+    } finally {
+      if (previousWindow === undefined) {
+        delete (globalThis as any).window;
+      } else {
+        (globalThis as any).window = previousWindow;
+      }
+    }
+  });
 });
 
 describe("Pages Router router helpers", () => {
   it("exports wrapWithRouterContext function", async () => {
     const mod = await import("../packages/vinext/src/shims/router.js");
     expect(typeof mod.wrapWithRouterContext).toBe("function");
+  });
+
+  it("serializes array query values as repeated params for object-form router URLs", async () => {
+    const previousWindow = (globalThis as any).window;
+    const pushState = vi.fn();
+    const replaceState = vi.fn();
+
+    (globalThis as any).window = {
+      location: {
+        pathname: "/",
+        search: "",
+        hash: "",
+        assign: vi.fn(),
+        replace: vi.fn(),
+        reload: vi.fn(),
+      },
+      history: {
+        state: null,
+        pushState,
+        replaceState,
+        back: vi.fn(),
+      },
+      dispatchEvent: vi.fn(),
+      scrollTo: vi.fn(),
+      scrollX: 0,
+      scrollY: 0,
+      __NEXT_DATA__: {
+        page: "/",
+        query: {},
+        isFallback: false,
+      },
+      __VINEXT_LOCALE__: undefined,
+      __VINEXT_LOCALES__: undefined,
+      __VINEXT_DEFAULT_LOCALE__: undefined,
+    };
+
+    try {
+      const routerModule = await import("../packages/vinext/src/shims/router.js");
+      await routerModule.default.push(
+        { pathname: "/search", query: { tag: ["a", "b"], q: "x" } },
+        undefined,
+        { shallow: true },
+      );
+
+      expect(pushState).toHaveBeenCalledWith({}, "", "/search?tag=a&tag=b&q=x");
+    } finally {
+      if (previousWindow === undefined) {
+        delete (globalThis as any).window;
+      } else {
+        (globalThis as any).window = previousWindow;
+      }
+    }
+  });
+
+  it("stringifies scalar query values like Next.js for object-form router URLs", async () => {
+    const previousWindow = (globalThis as any).window;
+    const pushState = vi.fn();
+    const replaceState = vi.fn();
+
+    (globalThis as any).window = {
+      location: {
+        pathname: "/",
+        search: "",
+        hash: "",
+        assign: vi.fn(),
+        replace: vi.fn(),
+        reload: vi.fn(),
+      },
+      history: {
+        state: null,
+        pushState,
+        replaceState,
+        back: vi.fn(),
+      },
+      dispatchEvent: vi.fn(),
+      scrollTo: vi.fn(),
+      scrollX: 0,
+      scrollY: 0,
+      __NEXT_DATA__: {
+        page: "/",
+        query: {},
+        isFallback: false,
+      },
+      __VINEXT_LOCALE__: undefined,
+      __VINEXT_LOCALES__: undefined,
+      __VINEXT_DEFAULT_LOCALE__: undefined,
+    };
+
+    try {
+      const routerModule = await import("../packages/vinext/src/shims/router.js");
+      await routerModule.default.push(
+        {
+          pathname: "/search",
+          query: { page: 2, draft: false, empty: null, missing: undefined, tag: ["a", "b"] },
+        },
+        undefined,
+        { shallow: true },
+      );
+
+      expect(pushState).toHaveBeenCalledWith(
+        {},
+        "",
+        "/search?page=2&draft=false&empty=&missing=&tag=a&tag=b",
+      );
+    } finally {
+      if (previousWindow === undefined) {
+        delete (globalThis as any).window;
+      } else {
+        (globalThis as any).window = previousWindow;
+      }
+    }
+  });
+
+  it("exposes beforePopState on both the Router singleton and wrapped router context", async () => {
+    const React = await import("react");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const mod = await import("../packages/vinext/src/shims/router.js");
+    const { useRouter: useCompatRouter } =
+      await import("../packages/vinext/src/shims/compat-router.js");
+    const routerSingleton = mod.default;
+
+    let captured: unknown = "NOT_SET";
+    function Probe() {
+      captured = useCompatRouter();
+      return React.createElement("div", null, "probe");
+    }
+
+    renderToStaticMarkup(mod.wrapWithRouterContext(React.createElement(Probe)));
+
+    expect(typeof (routerSingleton as any).beforePopState).toBe("function");
+    expect(typeof (captured as any).beforePopState).toBe("function");
   });
 
   describe("isExternalUrl", () => {
@@ -6483,6 +6904,55 @@ describe("Pages Router router helpers", () => {
 
     it("returns false for full URLs without window context", () => {
       expect(isHashOnlyChange("https://example.com#foo")).toBe(false);
+    });
+  });
+
+  describe("applyNavigationLocale", () => {
+    it("does not prefix absolute https:// URLs", async () => {
+      const { applyNavigationLocale } = await import("../packages/vinext/src/shims/router.js");
+      // Simulate a browser-like window so the locale guard is reached
+      (globalThis as any).window = { __VINEXT_DEFAULT_LOCALE__: "en" };
+      try {
+        expect(applyNavigationLocale("https://example.com/about", "fr")).toBe(
+          "https://example.com/about",
+        );
+      } finally {
+        delete (globalThis as any).window;
+      }
+    });
+
+    it("does not prefix absolute http:// URLs", async () => {
+      const { applyNavigationLocale } = await import("../packages/vinext/src/shims/router.js");
+      (globalThis as any).window = { __VINEXT_DEFAULT_LOCALE__: "en" };
+      try {
+        expect(applyNavigationLocale("http://example.com/path", "de")).toBe(
+          "http://example.com/path",
+        );
+      } finally {
+        delete (globalThis as any).window;
+      }
+    });
+
+    it("does not prefix protocol-relative // URLs", async () => {
+      const { applyNavigationLocale } = await import("../packages/vinext/src/shims/router.js");
+      (globalThis as any).window = { __VINEXT_DEFAULT_LOCALE__: "en" };
+      try {
+        expect(applyNavigationLocale("//cdn.example.com/img.png", "fr")).toBe(
+          "//cdn.example.com/img.png",
+        );
+      } finally {
+        delete (globalThis as any).window;
+      }
+    });
+
+    it("prefixes local paths with locale", async () => {
+      const { applyNavigationLocale } = await import("../packages/vinext/src/shims/router.js");
+      (globalThis as any).window = { __VINEXT_DEFAULT_LOCALE__: "en" };
+      try {
+        expect(applyNavigationLocale("/about", "fr")).toBe("/fr/about");
+      } finally {
+        delete (globalThis as any).window;
+      }
     });
   });
 });
@@ -7734,12 +8204,124 @@ describe("handleImageOptimization", () => {
 });
 
 describe("next/navigation enhancements", () => {
-  it("exports ReadonlyURLSearchParams type alias", async () => {
-    // This is a type-only export, we verify the module loads without error
+  it("exports ReadonlyURLSearchParams runtime class", async () => {
     const nav = await import("../packages/vinext/src/shims/navigation.js");
-    // ReadonlyURLSearchParams is a type export, not a runtime value
-    // But useServerInsertedHTML should be exported
+    expect(typeof nav.ReadonlyURLSearchParams).toBe("function");
     expect(typeof nav.useServerInsertedHTML).toBe("function");
+  });
+
+  it("ReadonlyURLSearchParams preserves reads and blocks mutation methods", async () => {
+    const { ReadonlyURLSearchParams } = await import("../packages/vinext/src/shims/navigation.js");
+
+    const searchParams = new ReadonlyURLSearchParams("foo=bar&foo=baz&zap=zazzle");
+
+    expect(searchParams).toBeInstanceOf(URLSearchParams);
+    expect(searchParams).toBeInstanceOf(ReadonlyURLSearchParams);
+    expect(searchParams.get("foo")).toBe("bar");
+    expect(searchParams.getAll("foo")).toEqual(["bar", "baz"]);
+    expect(searchParams.toString()).toBe("foo=bar&foo=baz&zap=zazzle");
+    expect(() => searchParams.append("x", "1")).toThrow(
+      "Method unavailable on `ReadonlyURLSearchParams`.",
+    );
+    expect(() => searchParams.delete("foo")).toThrow(
+      "Method unavailable on `ReadonlyURLSearchParams`.",
+    );
+    expect(() => searchParams.set("foo", "qux")).toThrow(
+      "Method unavailable on `ReadonlyURLSearchParams`.",
+    );
+    expect(() => searchParams.sort()).toThrow("Method unavailable on `ReadonlyURLSearchParams`.");
+    expect(searchParams.toString()).toBe("foo=bar&foo=baz&zap=zazzle");
+  });
+
+  it("useSearchParams returns a readonly wrapper on the server path", async () => {
+    const { ReadonlyURLSearchParams, setNavigationContext, useSearchParams } =
+      await import("../packages/vinext/src/shims/navigation.js");
+
+    try {
+      setNavigationContext({
+        pathname: "/readonly-test",
+        searchParams: new URLSearchParams("foo=bar&foo=baz"),
+        params: {},
+      });
+
+      const searchParams = useSearchParams();
+
+      expect(searchParams).toBeInstanceOf(ReadonlyURLSearchParams);
+      expect(searchParams.getAll("foo")).toEqual(["bar", "baz"]);
+      expect(() => searchParams.set("foo", "qux")).toThrow(
+        "Method unavailable on `ReadonlyURLSearchParams`.",
+      );
+    } finally {
+      setNavigationContext(null);
+    }
+  });
+
+  it("useSearchParams reuses the same readonly wrapper for the same server context", async () => {
+    const { setNavigationContext, useSearchParams } =
+      await import("../packages/vinext/src/shims/navigation.js");
+
+    try {
+      const ctx = {
+        pathname: "/readonly-test",
+        searchParams: new URLSearchParams("foo=bar"),
+        params: {},
+      };
+
+      setNavigationContext(ctx);
+
+      const first = useSearchParams();
+      const second = useSearchParams();
+
+      expect(first).toBe(second);
+    } finally {
+      setNavigationContext(null);
+    }
+  });
+
+  it("useSearchParams keeps wrapper identity stable across concurrent ALS-scoped requests", async () => {
+    const { runWithNavigationContext } =
+      await import("../packages/vinext/src/shims/navigation-state.js");
+    const { setNavigationContext, useSearchParams } =
+      await import("../packages/vinext/src/shims/navigation.js");
+
+    let releaseInterleave!: () => void;
+    const waitForInterleave = new Promise<void>((resolve) => {
+      releaseInterleave = resolve;
+    });
+
+    async function runRequest(query: string, pathname: string) {
+      return runWithNavigationContext(async () => {
+        setNavigationContext({
+          pathname,
+          searchParams: new URLSearchParams(query),
+          params: {},
+        });
+
+        const first = useSearchParams();
+        await waitForInterleave;
+        const second = useSearchParams();
+
+        return {
+          first,
+          second,
+          value: first.toString(),
+        };
+      });
+    }
+
+    const requestA = runRequest("a=1", "/request-a");
+    const requestB = runRequest("b=2", "/request-b");
+
+    await Promise.resolve();
+    releaseInterleave();
+
+    const [a, b] = await Promise.all([requestA, requestB]);
+
+    expect(a.first).toBe(a.second);
+    expect(b.first).toBe(b.second);
+    expect(a.value).toBe("a=1");
+    expect(b.value).toBe("b=2");
+    expect(a.first).not.toBe(b.first);
   });
 
   it("useServerInsertedHTML is a no-op function", async () => {

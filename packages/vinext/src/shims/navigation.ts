@@ -13,6 +13,7 @@
 import * as React from "react";
 import { toSameOriginPath } from "./url-utils.js";
 import { stripBasePath } from "../utils/base-path.js";
+import { ReadonlyURLSearchParams } from "./readonly-url-search-params.js";
 
 // ─── Layout segment context ───────────────────────────────────────────────────
 // Stores the child segments below the current layout. Each layout wraps its
@@ -81,6 +82,14 @@ export interface NavigationContext {
   searchParams: URLSearchParams;
   params: Record<string, string | string[]>;
 }
+
+const _READONLY_SEARCH_PARAMS = Symbol("vinext.navigation.readonlySearchParams");
+const _READONLY_SEARCH_PARAMS_SOURCE = Symbol("vinext.navigation.readonlySearchParamsSource");
+
+type NavigationContextWithReadonlyCache = NavigationContext & {
+  [_READONLY_SEARCH_PARAMS]?: ReadonlyURLSearchParams;
+  [_READONLY_SEARCH_PARAMS_SOURCE]?: URLSearchParams;
+};
 
 // ---------------------------------------------------------------------------
 // Server-side navigation state lives in a separate server-only module
@@ -157,7 +166,7 @@ function withBasePath(p: string): string {
 // ---------------------------------------------------------------------------
 
 /** Maximum number of entries in the RSC prefetch cache. */
-const MAX_PREFETCH_CACHE_SIZE = 50;
+export const MAX_PREFETCH_CACHE_SIZE = 50;
 
 /** TTL for prefetch cache entries in ms (matches Next.js static prefetch TTL). */
 export const PREFETCH_CACHE_TTL = 30_000;
@@ -211,12 +220,29 @@ export function getPrefetchedUrls(): Set<string> {
  */
 export function storePrefetchResponse(rscUrl: string, response: Response): void {
   const cache = getPrefetchCache();
-  // Evict oldest entry if at capacity (Map iterates in insertion order)
+  const now = Date.now();
+
+  // Sweep expired entries before resorting to FIFO eviction
+  if (cache.size >= MAX_PREFETCH_CACHE_SIZE) {
+    const prefetched = getPrefetchedUrls();
+    for (const [key, entry] of cache) {
+      if (now - entry.timestamp >= PREFETCH_CACHE_TTL) {
+        cache.delete(key);
+        prefetched.delete(key);
+      }
+    }
+  }
+
+  // FIFO fallback if still at capacity after sweep
   if (cache.size >= MAX_PREFETCH_CACHE_SIZE) {
     const oldest = cache.keys().next().value;
-    if (oldest !== undefined) cache.delete(oldest);
+    if (oldest !== undefined) {
+      cache.delete(oldest);
+      getPrefetchedUrls().delete(oldest);
+    }
   }
-  cache.set(rscUrl, { response, timestamp: Date.now() });
+
+  cache.set(rscUrl, { response, timestamp: now });
 }
 
 // Client navigation listeners
@@ -231,8 +257,8 @@ function notifyListeners(): void {
 // useSyncExternalStore compares snapshots with Object.is — avoid creating
 // new instances on every render (infinite re-renders).
 let _cachedSearch = !isServer ? window.location.search : "";
-let _cachedSearchParams: URLSearchParams = new URLSearchParams(_cachedSearch);
-let _cachedServerSearchParams: URLSearchParams | null = null;
+let _cachedReadonlySearchParams = new ReadonlyURLSearchParams(_cachedSearch);
+let _cachedEmptyServerSearchParams: ReadonlyURLSearchParams | null = null;
 let _cachedPathname = !isServer ? stripBasePath(window.location.pathname, __basePath) : "/";
 
 function getPathnameSnapshot(): string {
@@ -243,22 +269,29 @@ function getPathnameSnapshot(): string {
   return _cachedPathname;
 }
 
-function getSearchParamsSnapshot(): URLSearchParams {
+function getSearchParamsSnapshot(): ReadonlyURLSearchParams {
   const current = window.location.search;
   if (current !== _cachedSearch) {
     _cachedSearch = current;
-    _cachedSearchParams = new URLSearchParams(current);
+    _cachedReadonlySearchParams = new ReadonlyURLSearchParams(current);
   }
-  return _cachedSearchParams;
+  return _cachedReadonlySearchParams;
 }
 
-function getServerSearchParamsSnapshot(): URLSearchParams {
-  const ctx = _getServerContext();
-  if (ctx?.searchParams != null) return ctx.searchParams;
-  if (_cachedServerSearchParams === null) {
-    _cachedServerSearchParams = new URLSearchParams();
+function getServerSearchParamsSnapshot(): ReadonlyURLSearchParams {
+  const ctx = _getServerContext() as NavigationContextWithReadonlyCache | null;
+  if (ctx != null) {
+    const searchParams = ctx.searchParams;
+    if (ctx[_READONLY_SEARCH_PARAMS_SOURCE] !== searchParams) {
+      ctx[_READONLY_SEARCH_PARAMS_SOURCE] = searchParams;
+      ctx[_READONLY_SEARCH_PARAMS] = new ReadonlyURLSearchParams(searchParams);
+    }
+    return ctx[_READONLY_SEARCH_PARAMS]!;
   }
-  return _cachedServerSearchParams;
+  if (_cachedEmptyServerSearchParams === null) {
+    _cachedEmptyServerSearchParams = new ReadonlyURLSearchParams();
+  }
+  return _cachedEmptyServerSearchParams;
 }
 
 // Track client-side params (set during RSC hydration/navigation)
@@ -310,11 +343,11 @@ export function usePathname(): string {
 /**
  * Returns the current search params as a read-only URLSearchParams.
  */
-export function useSearchParams(): URLSearchParams {
+export function useSearchParams(): ReadonlyURLSearchParams {
   if (isServer) {
     // During SSR of "use client" components, the navigation context may not be set.
     // Return a safe fallback — the client will hydrate with the real value.
-    return _getServerContext()?.searchParams ?? new URLSearchParams();
+    return getServerSearchParamsSnapshot();
   }
   return React.useSyncExternalStore(
     (cb: () => void) => {
@@ -632,12 +665,7 @@ export function useSelectedLayoutSegments(
   return useChildSegments();
 }
 
-/**
- * ReadonlyURLSearchParams — type alias matching Next.js.
- * In Next.js this prevents mutation, but since URLSearchParams is the underlying
- * type in our implementation, we export it as-is for type compatibility.
- */
-export type ReadonlyURLSearchParams = URLSearchParams;
+export { ReadonlyURLSearchParams };
 
 /**
  * useServerInsertedHTML — inject HTML during SSR from client components.

@@ -259,6 +259,7 @@ import { runWithPrivateCache } from "vinext/cache-runtime";
 import { runWithRouterState } from "vinext/router-state";
 import { runWithHeadState } from "vinext/head-state";
 import { safeJsonStringify } from "vinext/html";
+import { decode as decodeQueryString } from "node:querystring";
 import { getSSRFontLinks as _getSSRFontLinks, getSSRFontStyles as _getSSRFontStylesGoogle, getSSRFontPreloads as _getSSRFontPreloadsGoogle } from "next/font/google";
 import { getSSRFontStyles as _getSSRFontStylesLocal, getSSRFontPreloads as _getSSRFontPreloadsLocal } from "next/font/local";
 import { parseCookies } from ${JSON.stringify(path.resolve(__dirname, "../config/config-matchers.js").replace(/\\/g, "/"))};
@@ -276,6 +277,14 @@ const buildId = ${buildIdJson};
 
 // Full resolved config for production server (embedded at build time)
 export const vinextConfig = ${vinextConfigJson};
+
+class ApiBodyParseError extends Error {
+  constructor(message, statusCode) {
+    super(message);
+    this.statusCode = statusCode;
+    this.name = "ApiBodyParseError";
+  }
+}
 
 // ISR cache helpers (inlined for the server entry)
 async function isrGet(key) {
@@ -299,6 +308,29 @@ function triggerBackgroundRegeneration(key, renderFn) {
   // until the regeneration finishes, even after the Response has been sent.
   const ctx = _getRequestExecutionContext();
   if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(promise);
+}
+
+function fnv1a64(input) {
+  let h1 = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    h1 ^= input.charCodeAt(i);
+    h1 = (h1 * 0x01000193) >>> 0;
+  }
+  let h2 = 0x050c5d1f;
+  for (let i = 0; i < input.length; i++) {
+    h2 ^= input.charCodeAt(i);
+    h2 = (h2 * 0x01000193) >>> 0;
+  }
+  return h1.toString(36) + h2.toString(36);
+}
+// Keep prefix construction and hashing logic in sync with isrCacheKey() in server/isr-cache.ts.
+// buildId is a top-level const in the generated entry (see "const buildId = ..." above).
+function isrCacheKey(router, pathname) {
+  const normalized = pathname === "/" ? "/" : pathname.replace(/\\/$/, "");
+  const prefix = buildId ? router + ":" + buildId : router;
+  const key = prefix + ":" + normalized;
+  if (key.length <= 200) return key;
+  return prefix + ":__hash:" + fnv1a64(normalized);
 }
 
 async function renderToStringAsync(element) {
@@ -608,8 +640,16 @@ function createReqRes(request, url, query, body) {
       res.end(JSON.stringify(data));
     },
     send: function(data) {
-      if (typeof data === "object" && data !== null) { res.json(data); }
-      else { if (!resHeaders["content-type"]) resHeaders["content-type"] = "text/plain"; res.end(String(data)); }
+      if (Buffer.isBuffer(data)) {
+        if (!resHeaders["content-type"]) resHeaders["content-type"] = "application/octet-stream";
+        resHeaders["content-length"] = String(data.length);
+        res.end(data);
+      } else if (typeof data === "object" && data !== null) {
+        res.json(data);
+      } else {
+        if (!resHeaders["content-type"]) resHeaders["content-type"] = "text/plain";
+        res.end(String(data));
+      }
     },
     redirect: function(statusOrUrl, url2) {
       if (typeof statusOrUrl === "string") { res.writeHead(307, { Location: statusOrUrl }); }
@@ -692,7 +732,7 @@ async function _renderPage(request, url, manifest) {
   try {
     if (typeof setSSRContext === "function") {
       setSSRContext({
-        pathname: routeUrl.split("?")[0],
+        pathname: patternToNextFormat(route.pattern),
         query: { ...params, ...parseQuery(routeUrl) },
         asPath: routeUrl,
         locale: locale,
@@ -785,7 +825,7 @@ async function _renderPage(request, url, manifest) {
     let isrRevalidateSeconds = null;
     if (typeof pageModule.getStaticProps === "function") {
       const pathname = routeUrl.split("?")[0];
-      const cacheKey = "pages:" + (pathname === "/" ? "/" : pathname.replace(/\\/$/, ""));
+      const cacheKey = isrCacheKey("pages", pathname);
       const cached = await isrGet(cacheKey);
 
       if (cached && !cached.isStale && cached.value.value && cached.value.value.kind === "PAGES") {
@@ -940,8 +980,8 @@ async function _renderPage(request, url, manifest) {
       var isrHtml = await renderToStringAsync(isrElement);
       var fullHtml = shellPrefix + isrHtml + shellSuffix;
       var isrPathname = url.split("?")[0];
-      var isrCacheKey = "pages:" + (isrPathname === "/" ? "/" : isrPathname.replace(/\\/$/, ""));
-      await isrSet(isrCacheKey, { kind: "PAGES", html: fullHtml, pageData: pageProps, headers: undefined, status: undefined }, isrRevalidateSeconds);
+      var _cacheKey = isrCacheKey("pages", isrPathname);
+      await isrSet(_cacheKey, { kind: "PAGES", html: fullHtml, pageData: pageProps, headers: undefined, status: undefined }, isrRevalidateSeconds);
     }
 
     // Merge headers/status/cookies set by getServerSideProps on the res object.
@@ -1015,28 +1055,32 @@ export async function handleApiRoute(request, url) {
   if (contentLength > 1 * 1024 * 1024) {
     return new Response("Request body too large", { status: 413 });
   }
-  let body;
-  const ct = request.headers.get("content-type") || "";
-  let rawBody;
-  try { rawBody = await readBodyWithLimit(request, 1 * 1024 * 1024); }
-  catch { return new Response("Request body too large", { status: 413 }); }
-  if (!rawBody) {
-    body = undefined;
-  } else if (ct.includes("application/json")) {
-    try { body = JSON.parse(rawBody); } catch { body = rawBody; }
-  } else {
-    body = rawBody;
-  }
-
-  const { req, res, responsePromise } = createReqRes(request, url, query, body);
-
   try {
+    let body;
+    const ct = request.headers.get("content-type") || "";
+    let rawBody;
+    try { rawBody = await readBodyWithLimit(request, 1 * 1024 * 1024); }
+    catch { return new Response("Request body too large", { status: 413 }); }
+    if (!rawBody) {
+      body = undefined;
+    } else if (ct.includes("application/json")) {
+      try { body = JSON.parse(rawBody); } catch { throw new ApiBodyParseError("Invalid JSON", 400); }
+    } else if (ct.includes("application/x-www-form-urlencoded")) {
+      body = decodeQueryString(rawBody);
+    } else {
+      body = rawBody;
+    }
+
+    const { req, res, responsePromise } = createReqRes(request, url, query, body);
     await handler(req, res);
     // If handler didn't call res.end(), end it now.
     // The end() method is idempotent — safe to call twice.
     res.end();
     return await responsePromise;
   } catch (e) {
+    if (e instanceof ApiBodyParseError) {
+      return new Response(e.message, { status: e.statusCode });
+    }
     console.error("[vinext] API error:", e);
     return new Response("Internal Server Error", { status: 500 });
   }

@@ -21,14 +21,7 @@ import {
   type CachedAppPageValue,
 } from "../shims/cache.js";
 import { fnv1a64 } from "../utils/hash.js";
-
-/**
- * Minimal ExecutionContext interface for Cloudflare Workers.
- * Matches the Workers runtime type; also works with the stub used in tests.
- */
-export interface ExecutionContext {
-  waitUntil(promise: Promise<unknown>): void;
-}
+import { getRequestExecutionContext } from "../shims/request-context.js";
 
 export interface ISRCacheEntry {
   value: CacheHandlerValue;
@@ -81,16 +74,11 @@ const pendingRegenerations = new Map<string, Promise<void>>();
  * If a regeneration for this key is already in progress, this is a no-op.
  * The renderFn should produce the new cache value and call isrSet internally.
  *
- * On Cloudflare Workers, pass the `ExecutionContext` as `ctx` so the
- * regeneration promise is registered with `ctx.waitUntil()`. Without this,
- * the Workers runtime terminates the isolate as soon as the Response is
- * returned, silently killing any pending background work.
+ * On Cloudflare Workers the regeneration promise is registered with
+ * `ctx.waitUntil()` via the ALS-backed ExecutionContext, keeping the isolate
+ * alive until the regeneration completes even after the Response is returned.
  */
-export function triggerBackgroundRegeneration(
-  key: string,
-  renderFn: () => Promise<void>,
-  ctx?: ExecutionContext,
-): void {
+export function triggerBackgroundRegeneration(key: string, renderFn: () => Promise<void>): void {
   if (pendingRegenerations.has(key)) return;
 
   const promise = renderFn()
@@ -103,10 +91,10 @@ export function triggerBackgroundRegeneration(
 
   pendingRegenerations.set(key, promise);
 
-  // Register with the Workers ExecutionContext so the runtime keeps the
-  // isolate alive until the regeneration completes, even after the Response
-  // has already been sent to the client.
-  ctx?.waitUntil(promise);
+  // Register with the Workers ExecutionContext (retrieved from ALS) so the
+  // runtime keeps the isolate alive until the regeneration completes, even
+  // after the Response has already been sent to the client.
+  getRequestExecutionContext()?.waitUntil(promise);
 }
 
 // ---------------------------------------------------------------------------
@@ -152,11 +140,12 @@ export function buildAppPageCacheValue(
  * Compute an ISR cache key for a given router type and pathname.
  * Long pathnames are hashed to stay within KV key-length limits (512 bytes).
  */
-export function isrCacheKey(router: "pages" | "app", pathname: string): string {
+export function isrCacheKey(router: "pages" | "app", pathname: string, buildId?: string): string {
   const normalized = pathname === "/" ? "/" : pathname.replace(/\/$/, "");
-  const key = `${router}:${normalized}`;
+  const prefix = buildId ? `${router}:${buildId}` : router;
+  const key = `${prefix}:${normalized}`;
   if (key.length <= 200) return key;
-  return `${router}:__hash:${fnv1a64(normalized)}`;
+  return `${prefix}:__hash:${fnv1a64(normalized)}`;
 }
 
 // ---------------------------------------------------------------------------

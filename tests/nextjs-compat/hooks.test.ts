@@ -17,6 +17,7 @@
  * - fixtures/app-basic/app/nextjs-compat/hooks-params/[id]/[subid]/page.tsx
  * - fixtures/app-basic/app/nextjs-compat/hooks-params/catchall/[...slug]/page.tsx
  * - fixtures/app-basic/app/nextjs-compat/hooks-search/page.tsx
+ * - fixtures/app-basic/app/nextjs-compat/hooks-search-readonly/page.tsx
  * - fixtures/app-basic/app/nextjs-compat/hooks-router/page.tsx
  */
 
@@ -85,6 +86,34 @@ describe("Next.js compat: hooks", () => {
     // Both q and page should show "N/A" when no query string is provided
     expect(html).toContain('<p id="param-q">N/A</p>');
     expect(html).toContain('<p id="param-page">N/A</p>');
+  });
+
+  // Next.js: 'should be able to use instanceof ReadonlyURLSearchParams'
+  // Source: https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/hooks/hooks.test.ts
+  // Source fixture: https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/hooks/app/hooks/use-search-params/instanceof/page.js
+
+  it("useSearchParams returns a ReadonlyURLSearchParams instance in SSR", async () => {
+    const { html } = await fetchHtml(
+      baseUrl,
+      "/nextjs-compat/hooks-search-readonly?foo=bar&foo=baz&zap=zazzle",
+    );
+
+    expect(html).toContain("PASS instanceof check");
+    expect(html).toContain("PASS mutation blocked");
+    expect(html).toContain("foo=bar&amp;foo=baz&amp;zap=zazzle");
+    expect(html).not.toContain("attempted=1");
+  });
+
+  // Vinext regression coverage for readonly behavior. Next.js enforces this at runtime
+  // with ReadonlyURLSearchParams, so verify the thrown error text is surfaced in SSR too.
+
+  it("useSearchParams blocks mutation methods during SSR", async () => {
+    const { html } = await fetchHtml(baseUrl, "/nextjs-compat/hooks-search-readonly?foo=bar");
+
+    expect(html).toContain("PASS mutation blocked");
+    expect(html).toContain("Method unavailable on `ReadonlyURLSearchParams`.");
+    expect(html).toContain("foo=bar");
+    expect(html).not.toContain("attempted=1");
   });
 
   // ── usePathname SSR ─────────────────────────────────────────

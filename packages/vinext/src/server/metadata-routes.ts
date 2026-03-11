@@ -38,14 +38,20 @@ export interface SitemapEntry {
     content_loc?: string;
     player_loc?: string;
     duration?: number;
-    expiration_date?: string;
+    expiration_date?: string | Date;
     rating?: number;
     view_count?: number;
-    publication_date?: string;
+    publication_date?: string | Date;
     family_friendly?: "yes" | "no";
     restriction?: { relationship: "allow" | "deny"; content: string };
     platform?: { relationship: "allow" | "deny"; content: string };
+    requires_subscription?: "yes" | "no";
+    uploader?: {
+      info?: string;
+      content?: string;
+    };
     live?: "yes" | "no";
+    tag?: string;
   }>;
 }
 
@@ -175,42 +181,90 @@ export const METADATA_FILE_MAP: Record<
  * Convert a sitemap array to XML string.
  */
 export function sitemapToXml(entries: SitemapEntry[]): string {
-  const lines = [
-    '<?xml version="1.0" encoding="UTF-8"?>',
-    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
-  ];
+  const hasAlternates = entries.some((entry) => Object.keys(entry.alternates ?? {}).length > 0);
+  const hasImages = entries.some((entry) => Boolean(entry.images?.length));
+  const hasVideos = entries.some((entry) => Boolean(entry.videos?.length));
+  let content = "";
+
+  content += '<?xml version="1.0" encoding="UTF-8"?>\n';
+  content += '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"';
+  if (hasImages) {
+    content += ' xmlns:image="http://www.google.com/schemas/sitemap-image/1.1"';
+  }
+  if (hasVideos) {
+    content += ' xmlns:video="http://www.google.com/schemas/sitemap-video/1.1"';
+  }
+  if (hasAlternates) {
+    content += ' xmlns:xhtml="http://www.w3.org/1999/xhtml">\n';
+  } else {
+    content += ">\n";
+  }
 
   for (const entry of entries) {
-    lines.push("  <url>");
-    lines.push(`    <loc>${escapeXml(entry.url)}</loc>`);
+    content += "<url>\n";
+    content += `<loc>${entry.url}</loc>\n`;
 
-    if (entry.lastModified) {
-      const date =
-        entry.lastModified instanceof Date ? entry.lastModified.toISOString() : entry.lastModified;
-      lines.push(`    <lastmod>${escapeXml(date)}</lastmod>`);
-    }
-
-    if (entry.changeFrequency) {
-      lines.push(`    <changefreq>${escapeXml(entry.changeFrequency)}</changefreq>`);
-    }
-
-    if (entry.priority !== undefined) {
-      lines.push(`    <priority>${entry.priority}</priority>`);
-    }
-
-    if (entry.images) {
-      for (const image of entry.images) {
-        lines.push("    <image:image>");
-        lines.push(`      <image:loc>${escapeXml(image)}</image:loc>`);
-        lines.push("    </image:image>");
+    const languages = entry.alternates?.languages;
+    if (languages && Object.keys(languages).length) {
+      for (const language in languages) {
+        content += `<xhtml:link rel="alternate" hreflang="${language}" href="${languages[language]}" />\n`;
       }
     }
 
-    lines.push("  </url>");
+    if (entry.images?.length) {
+      for (const image of entry.images) {
+        content += `<image:image>\n<image:loc>${image}</image:loc>\n</image:image>\n`;
+      }
+    }
+
+    if (entry.videos?.length) {
+      for (const video of entry.videos) {
+        const videoFields = [
+          "<video:video>",
+          `<video:title>${video.title}</video:title>`,
+          `<video:thumbnail_loc>${video.thumbnail_loc}</video:thumbnail_loc>`,
+          `<video:description>${video.description}</video:description>`,
+          video.content_loc && `<video:content_loc>${video.content_loc}</video:content_loc>`,
+          video.player_loc && `<video:player_loc>${video.player_loc}</video:player_loc>`,
+          video.duration && `<video:duration>${video.duration}</video:duration>`,
+          video.view_count && `<video:view_count>${video.view_count}</video:view_count>`,
+          video.tag && `<video:tag>${video.tag}</video:tag>`,
+          video.rating && `<video:rating>${video.rating}</video:rating>`,
+          video.expiration_date &&
+            `<video:expiration_date>${video.expiration_date}</video:expiration_date>`,
+          video.publication_date &&
+            `<video:publication_date>${video.publication_date}</video:publication_date>`,
+          video.family_friendly &&
+            `<video:family_friendly>${video.family_friendly}</video:family_friendly>`,
+          video.requires_subscription &&
+            `<video:requires_subscription>${video.requires_subscription}</video:requires_subscription>`,
+          video.live && `<video:live>${video.live}</video:live>`,
+          video.restriction &&
+            `<video:restriction relationship="${video.restriction.relationship}">${video.restriction.content}</video:restriction>`,
+          video.platform &&
+            `<video:platform relationship="${video.platform.relationship}">${video.platform.content}</video:platform>`,
+          video.uploader &&
+            `<video:uploader${video.uploader.info ? ` info="${video.uploader.info}"` : ""}>${video.uploader.content}</video:uploader>`,
+          "</video:video>\n",
+        ].filter(Boolean);
+        content += videoFields.join("\n");
+      }
+    }
+
+    if (entry.lastModified) {
+      content += `<lastmod>${serializeDate(entry.lastModified)}</lastmod>\n`;
+    }
+    if (entry.changeFrequency) {
+      content += `<changefreq>${entry.changeFrequency}</changefreq>\n`;
+    }
+    if (typeof entry.priority === "number") {
+      content += `<priority>${entry.priority}</priority>\n`;
+    }
+    content += "</url>\n";
   }
 
-  lines.push("</urlset>");
-  return lines.join("\n");
+  content += "</urlset>\n";
+  return content;
 }
 
 /**
@@ -269,13 +323,8 @@ export function manifestToJson(config: ManifestConfig): string {
   return JSON.stringify(config, null, 2);
 }
 
-function escapeXml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
+function serializeDate(value: string | Date): string {
+  return value instanceof Date ? value.toISOString() : value;
 }
 
 // -------------------------------------------------------------------

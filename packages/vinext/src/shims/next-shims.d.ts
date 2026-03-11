@@ -76,7 +76,13 @@ declare module "next/navigation" {
     prefetch(href: string): void;
   };
   export function usePathname(): string;
-  export function useSearchParams(): URLSearchParams;
+  export class ReadonlyURLSearchParams extends URLSearchParams {
+    append(name: string, value: string): never;
+    delete(name: string, value?: string): never;
+    set(name: string, value: string): never;
+    sort(): never;
+  }
+  export function useSearchParams(): ReadonlyURLSearchParams;
   export function useParams<
     T extends Record<string, string | string[]> = Record<string, string | string[]>,
   >(): T;
@@ -98,8 +104,6 @@ declare module "next/navigation" {
   export const HTTP_ERROR_FALLBACK_ERROR_CODE: string;
   export function isHTTPAccessFallbackError(error: unknown): boolean;
   export function getAccessFallbackHTTPStatus(error: unknown): number;
-  export type ReadonlyURLSearchParams = URLSearchParams;
-
   // Context management (internal)
   export function setNavigationContext(ctx: any): void;
   export function setClientParams(params: Record<string, string | string[]>): void;
@@ -111,6 +115,7 @@ declare module "next/navigation" {
     response: Response;
     timestamp: number;
   }
+  export const MAX_PREFETCH_CACHE_SIZE: number;
   export const PREFETCH_CACHE_TTL: number;
   export function toRscUrl(href: string): string;
   export function getPrefetchCache(): Map<string, PrefetchCacheEntry>;

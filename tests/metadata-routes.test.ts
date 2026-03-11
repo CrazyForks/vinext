@@ -10,6 +10,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { resolveSitemap as nextResolveSitemap } from "next/dist/build/webpack/loaders/metadata/resolve-route-data.js";
 import {
   sitemapToXml,
   robotsToText,
@@ -21,6 +22,13 @@ import {
   type ManifestConfig,
 } from "../packages/vinext/src/server/metadata-routes.js";
 
+// Parity guard against Next.js's current sitemap serializer.
+// We intentionally compare against the installed implementation because
+// several edge cases are surprising but observable in Next itself.
+function expectSitemapToMatchNext(entries: SitemapEntry[]): void {
+  expect(sitemapToXml(entries)).toBe(nextResolveSitemap(entries));
+}
+
 // ─── sitemapToXml ───────────────────────────────────────────────────────
 
 describe("sitemapToXml", () => {
@@ -30,6 +38,7 @@ describe("sitemapToXml", () => {
       { url: "https://example.com/about" },
     ];
     const xml = sitemapToXml(entries);
+    expectSitemapToMatchNext(entries);
     expect(xml).toContain('<?xml version="1.0" encoding="UTF-8"?>');
     expect(xml).toContain('<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">');
     expect(xml).toContain("<loc>https://example.com</loc>");
@@ -38,28 +47,43 @@ describe("sitemapToXml", () => {
   });
 
   it("generates lastModified from Date", () => {
-    const date = new Date("2024-01-15T00:00:00Z");
-    const xml = sitemapToXml([{ url: "https://example.com", lastModified: date }]);
+    const entries: SitemapEntry[] = [
+      { url: "https://example.com", lastModified: new Date("2024-01-15T00:00:00Z") },
+    ];
+    const xml = sitemapToXml(entries);
+    expectSitemapToMatchNext(entries);
     expect(xml).toContain("<lastmod>2024-01-15T00:00:00.000Z</lastmod>");
   });
 
   it("generates lastModified from string", () => {
-    const xml = sitemapToXml([{ url: "https://example.com", lastModified: "2024-01-15" }]);
+    const entries: SitemapEntry[] = [{ url: "https://example.com", lastModified: "2024-01-15" }];
+    const xml = sitemapToXml(entries);
+    expectSitemapToMatchNext(entries);
     expect(xml).toContain("<lastmod>2024-01-15</lastmod>");
   });
 
   it("generates changeFrequency", () => {
-    const xml = sitemapToXml([{ url: "https://example.com", changeFrequency: "weekly" }]);
+    const entries: SitemapEntry[] = [{ url: "https://example.com", changeFrequency: "weekly" }];
+    const xml = sitemapToXml(entries);
+    expectSitemapToMatchNext(entries);
     expect(xml).toContain("<changefreq>weekly</changefreq>");
   });
 
   it("generates priority", () => {
-    const xml = sitemapToXml([{ url: "https://example.com", priority: 0.8 }]);
+    const entries: SitemapEntry[] = [{ url: "https://example.com", priority: 0.8 }];
+    const xml = sitemapToXml(entries);
+    expectSitemapToMatchNext(entries);
     expect(xml).toContain("<priority>0.8</priority>");
   });
 
   it("generates image entries", () => {
     const xml = sitemapToXml([
+      {
+        url: "https://example.com",
+        images: ["https://example.com/photo1.jpg", "https://example.com/photo2.jpg"],
+      },
+    ]);
+    expectSitemapToMatchNext([
       {
         url: "https://example.com",
         images: ["https://example.com/photo1.jpg", "https://example.com/photo2.jpg"],
@@ -71,41 +95,302 @@ describe("sitemapToXml", () => {
     expect(xml).toContain("</image:image>");
   });
 
+  it("adds the image namespace when image entries are present", () => {
+    const entries: SitemapEntry[] = [
+      {
+        url: "https://example.com",
+        images: ["https://example.com/photo.jpg"],
+      },
+    ];
+    const xml = sitemapToXml(entries);
+    expectSitemapToMatchNext(entries);
+    expect(xml).toContain('xmlns:image="http://www.google.com/schemas/sitemap-image/1.1"');
+  });
+
+  it("does not add optional namespaces when entries do not use them", () => {
+    const entries: SitemapEntry[] = [{ url: "https://example.com" }];
+    const xml = sitemapToXml(entries);
+    expectSitemapToMatchNext(entries);
+    expect(xml).not.toContain("xmlns:image=");
+    expect(xml).not.toContain("xmlns:video=");
+    expect(xml).not.toContain("xmlns:xhtml=");
+  });
+
+  it("emits alternate-language links with the xhtml namespace", () => {
+    const entries: SitemapEntry[] = [
+      {
+        url: "https://example.com",
+        alternates: {
+          languages: {
+            fr: "https://example.com/fr",
+            "en-US": "https://example.com/en-US",
+          },
+        },
+      },
+    ];
+    const xml = sitemapToXml(entries);
+    expectSitemapToMatchNext(entries);
+    expect(xml).toContain('xmlns:xhtml="http://www.w3.org/1999/xhtml"');
+    expect(xml).toContain(
+      '<xhtml:link rel="alternate" hreflang="fr" href="https://example.com/fr" />',
+    );
+    expect(xml).toContain(
+      '<xhtml:link rel="alternate" hreflang="en-US" href="https://example.com/en-US" />',
+    );
+  });
+
+  it("adds the xhtml namespace when alternates exists even if languages is empty", () => {
+    const entries: SitemapEntry[] = [
+      {
+        url: "https://example.com",
+        alternates: {
+          languages: {},
+        },
+      },
+    ];
+    const xml = sitemapToXml(entries);
+    expectSitemapToMatchNext(entries);
+    expect(xml).toContain('xmlns:xhtml="http://www.w3.org/1999/xhtml"');
+    expect(xml).not.toContain("<xhtml:link");
+  });
+
+  it("emits video entries with the video namespace", () => {
+    const entries: SitemapEntry[] = [
+      {
+        url: "https://example.com",
+        videos: [
+          {
+            title: "Launch Video",
+            thumbnail_loc: "https://example.com/thumb.jpg",
+            description: "Product launch video",
+            content_loc: "https://example.com/video.mp4",
+          },
+        ],
+      },
+    ];
+    const xml = sitemapToXml(entries);
+    expectSitemapToMatchNext(entries);
+    expect(xml).toContain('xmlns:video="http://www.google.com/schemas/sitemap-video/1.1"');
+    expect(xml).toContain("<video:video>");
+    expect(xml).toContain("<video:title>Launch Video</video:title>");
+    expect(xml).toContain(
+      "<video:thumbnail_loc>https://example.com/thumb.jpg</video:thumbnail_loc>",
+    );
+    expect(xml).toContain("<video:description>Product launch video</video:description>");
+    expect(xml).toContain("<video:content_loc>https://example.com/video.mp4</video:content_loc>");
+    expect(xml).toContain("</video:video>");
+  });
+
+  it("emits all supported optional video fields", () => {
+    const entries: SitemapEntry[] = [
+      {
+        url: "https://example.com",
+        videos: [
+          {
+            title: "Launch Video",
+            thumbnail_loc: "https://example.com/thumb.jpg",
+            description: "Product launch video",
+            player_loc: "https://example.com/player",
+            duration: 120,
+            expiration_date: "2024-08-01T12:00:00.000Z",
+            rating: 4.5,
+            view_count: 42,
+            publication_date: "2024-07-01T12:00:00.000Z",
+            family_friendly: "yes",
+            restriction: { relationship: "allow", content: "US GB" },
+            platform: { relationship: "deny", content: "tv" },
+            requires_subscription: "no",
+            uploader: { info: "https://example.com/authors/jane", content: "Jane Doe" },
+            live: "no",
+            tag: "launch",
+          },
+        ],
+      },
+    ];
+    const xml = sitemapToXml(entries);
+    expectSitemapToMatchNext(entries);
+    expect(xml).toContain("<video:player_loc>https://example.com/player</video:player_loc>");
+    expect(xml).toContain("<video:duration>120</video:duration>");
+    expect(xml).toContain(
+      "<video:expiration_date>2024-08-01T12:00:00.000Z</video:expiration_date>",
+    );
+    expect(xml).toContain("<video:rating>4.5</video:rating>");
+    expect(xml).toContain("<video:view_count>42</video:view_count>");
+    expect(xml).toContain(
+      "<video:publication_date>2024-07-01T12:00:00.000Z</video:publication_date>",
+    );
+    expect(xml).toContain("<video:family_friendly>yes</video:family_friendly>");
+    expect(xml).toContain('<video:restriction relationship="allow">US GB</video:restriction>');
+    expect(xml).toContain('<video:platform relationship="deny">tv</video:platform>');
+    expect(xml).toContain("<video:requires_subscription>no</video:requires_subscription>");
+    expect(xml).toContain(
+      '<video:uploader info="https://example.com/authors/jane">Jane Doe</video:uploader>',
+    );
+    expect(xml).toContain("<video:live>no</video:live>");
+    expect(xml).toContain("<video:tag>launch</video:tag>");
+  });
+
+  it("matches Next's raw interpolation for XML-sensitive values", () => {
+    const entries: SitemapEntry[] = [
+      {
+        url: "https://example.com?a=1&b=2",
+        alternates: {
+          languages: {
+            'fr"CA': "https://example.com/fr?a=1&b=2",
+          },
+        },
+        videos: [
+          {
+            title: 'Fish & "Chips"',
+            thumbnail_loc: "https://example.com/thumb.jpg?a=1&b=2",
+            description: "Tasty <b>meal</b>",
+            uploader: {
+              info: 'https://example.com/authors/jane?bio="yes"&x=1',
+              content: "Jane & Co",
+            },
+          },
+        ],
+      },
+    ];
+    const xml = sitemapToXml(entries);
+    expectSitemapToMatchNext(entries);
+    expect(xml).toContain("<loc>https://example.com?a=1&b=2</loc>");
+    expect(xml).toContain('href="https://example.com/fr?a=1&b=2"');
+    expect(xml).toContain('<video:title>Fish & "Chips"</video:title>');
+    expect(xml).toContain("<video:description>Tasty <b>meal</b></video:description>");
+    expect(xml).toContain(
+      '<video:uploader info="https://example.com/authors/jane?bio="yes"&x=1">Jane & Co</video:uploader>',
+    );
+  });
+
+  it("emits all namespaces together when mixed entries require them", () => {
+    const entries: SitemapEntry[] = [
+      {
+        url: "https://example.com",
+        alternates: { languages: { fr: "https://example.com/fr" } },
+        images: ["https://example.com/photo.jpg"],
+        videos: [
+          {
+            title: "Launch Video",
+            thumbnail_loc: "https://example.com/thumb.jpg",
+            description: "Product launch video",
+          },
+        ],
+      },
+    ];
+    const xml = sitemapToXml(entries);
+    expectSitemapToMatchNext(entries);
+    expect(xml).toContain('xmlns:image="http://www.google.com/schemas/sitemap-image/1.1"');
+    expect(xml).toContain('xmlns:video="http://www.google.com/schemas/sitemap-video/1.1"');
+    expect(xml).toContain('xmlns:xhtml="http://www.w3.org/1999/xhtml"');
+  });
+
   it("generates all fields together", () => {
-    const xml = sitemapToXml([
+    const entries: SitemapEntry[] = [
       {
         url: "https://example.com/blog",
         lastModified: "2024-06-01",
         changeFrequency: "daily",
         priority: 0.9,
+        alternates: { languages: { fr: "https://example.com/fr/blog" } },
         images: ["https://example.com/hero.jpg"],
+        videos: [
+          {
+            title: "Blog Video",
+            thumbnail_loc: "https://example.com/video-thumb.jpg",
+            description: "Blog teaser",
+          },
+        ],
       },
-    ]);
+    ];
+    const xml = sitemapToXml(entries);
+    expectSitemapToMatchNext(entries);
     expect(xml).toContain("<loc>https://example.com/blog</loc>");
     expect(xml).toContain("<lastmod>2024-06-01</lastmod>");
     expect(xml).toContain("<changefreq>daily</changefreq>");
     expect(xml).toContain("<priority>0.9</priority>");
+    expect(xml).toContain(
+      '<xhtml:link rel="alternate" hreflang="fr" href="https://example.com/fr/blog" />',
+    );
     expect(xml).toContain("<image:loc>https://example.com/hero.jpg</image:loc>");
+    expect(xml).toContain("<video:title>Blog Video</video:title>");
+    expect(xml.indexOf("<xhtml:link")).toBeLessThan(xml.indexOf("<image:image>"));
+    expect(xml.indexOf("<image:image>")).toBeLessThan(xml.indexOf("<video:video>"));
+    expect(xml.indexOf("<video:video>")).toBeLessThan(xml.indexOf("<lastmod>"));
   });
 
   it("generates valid XML for empty entries array", () => {
-    const xml = sitemapToXml([]);
+    const entries: SitemapEntry[] = [];
+    const xml = sitemapToXml(entries);
+    expectSitemapToMatchNext(entries);
     expect(xml).toContain('<?xml version="1.0"');
     expect(xml).toContain("<urlset");
     expect(xml).toContain("</urlset>");
     expect(xml).not.toContain("<url>");
   });
 
-  it("escapes XML entities in URLs", () => {
-    const xml = sitemapToXml([{ url: "https://example.com?a=1&b=2" }]);
-    expect(xml).toContain("&amp;");
-    expect(xml).not.toMatch(/<loc>[^<]*[^&]&[^a]/); // No unescaped & in loc
+  it("omits zero-valued optional video numerics like Next", () => {
+    const entries: SitemapEntry[] = [
+      {
+        url: "https://example.com",
+        videos: [
+          {
+            title: "Zeroes",
+            thumbnail_loc: "https://example.com/thumb.jpg",
+            description: "desc",
+            duration: 0,
+            rating: 0,
+            view_count: 0,
+          },
+        ],
+      },
+    ];
+    const xml = sitemapToXml(entries);
+    expectSitemapToMatchNext(entries);
+    expect(xml).not.toContain("<video:duration>0</video:duration>");
+    expect(xml).not.toContain("<video:rating>0</video:rating>");
+    expect(xml).not.toContain("<video:view_count>0</video:view_count>");
   });
 
-  it("escapes angle brackets in text content", () => {
-    const xml = sitemapToXml([{ url: "https://example.com/<script>" }]);
-    expect(xml).toContain("&lt;script&gt;");
-    expect(xml).not.toContain("<script>");
+  it("matches Next when uploader content is missing", () => {
+    const entries: SitemapEntry[] = [
+      {
+        url: "https://example.com",
+        videos: [
+          {
+            title: "Uploader",
+            thumbnail_loc: "https://example.com/thumb.jpg",
+            description: "desc",
+            uploader: {
+              info: "https://example.com/uploader",
+            },
+          },
+        ],
+      },
+    ];
+    const xml = sitemapToXml(entries);
+    expectSitemapToMatchNext(entries);
+    expect(xml).toContain(
+      '<video:uploader info="https://example.com/uploader">undefined</video:uploader>',
+    );
+  });
+
+  it("matches Next when video date fields are Date objects", () => {
+    const entries: SitemapEntry[] = [
+      {
+        url: "https://example.com",
+        videos: [
+          {
+            title: "Dates",
+            thumbnail_loc: "https://example.com/thumb.jpg",
+            description: "desc",
+            expiration_date: new Date("2024-08-01T12:00:00Z"),
+            publication_date: new Date("2024-07-01T12:00:00Z"),
+          },
+        ],
+      },
+    ];
+    expectSitemapToMatchNext(entries);
   });
 });
 

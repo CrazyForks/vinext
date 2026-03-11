@@ -550,6 +550,30 @@ describe("appRouter - route discovery", () => {
       expect(modalSlot!.interceptingRoutes[0].params).toEqual(["slug"]);
     });
   });
+
+  it("rejects sibling intercept targets that differ only by param name", async () => {
+    await withTempDir("vinext-app-intercept-dynamic-conflict-", async (tmpDir) => {
+      const appDir = path.join(tmpDir, "app");
+      await mkdir(path.join(appDir, "feed", "@modal", "(.)photos", "[id]"), { recursive: true });
+      await mkdir(path.join(appDir, "feed", "@modal", "(.)photos", "[slug]"), {
+        recursive: true,
+      });
+      await mkdir(path.join(appDir, "feed", "photos", "[id]"), { recursive: true });
+      await writeFile(path.join(appDir, "feed", "page.tsx"), EMPTY_PAGE);
+      await writeFile(path.join(appDir, "feed", "photos", "[id]", "page.tsx"), EMPTY_PAGE);
+      await writeFile(
+        path.join(appDir, "feed", "@modal", "(.)photos", "[id]", "page.tsx"),
+        EMPTY_PAGE,
+      );
+      await writeFile(
+        path.join(appDir, "feed", "@modal", "(.)photos", "[slug]", "page.tsx"),
+        EMPTY_PAGE,
+      );
+
+      invalidateAppRouteCache();
+      await expect(appRouter(appDir)).rejects.toThrow(/different slug names/);
+    });
+  });
 });
 
 describe("matchAppRoute - URL matching", () => {

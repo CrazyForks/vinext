@@ -1,6 +1,6 @@
-import SearchForm from "./search-form";
+import SearchForm from "../search/search-form";
 
-export default async function SearchPage({
+export default async function SearchAltPage({
   searchParams,
 }: {
   searchParams: Promise<{ q?: string; lang?: string; source?: string }>;
@@ -8,7 +8,7 @@ export default async function SearchPage({
   const { q, lang, source } = await searchParams;
   return (
     <main>
-      <h1>Search</h1>
+      <h1>Search Alt</h1>
       <SearchForm />
       {q && <p id="search-result">Results for: {q}</p>}
       {!q && <p id="search-empty">Enter a search term</p>}

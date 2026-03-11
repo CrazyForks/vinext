@@ -23,6 +23,7 @@ import React, {
 import { toRscUrl, getPrefetchedUrls, storePrefetchResponse } from "./navigation.js";
 import { isDangerousScheme } from "./url-safety.js";
 import { toSameOriginPath } from "./url-utils.js";
+import { appendSearchParamsToUrl, type UrlQuery, urlQueryToSearchParams } from "../utils/query.js";
 import type { VinextNextData } from "../client/vinext-next-data.js";
 
 interface NavigateEvent {
@@ -34,7 +35,7 @@ interface NavigateEvent {
 }
 
 interface LinkProps extends Omit<AnchorHTMLAttributes<HTMLAnchorElement>, "href"> {
-  href: string | { pathname?: string; query?: Record<string, string> };
+  href: string | { pathname?: string; query?: UrlQuery };
   /** URL displayed in the browser (when href is a route pattern like /user/[id]) */
   as?: string;
   /** Replace the current history entry instead of pushing */
@@ -78,8 +79,8 @@ function resolveHref(href: LinkProps["href"]): string {
   if (typeof href === "string") return href;
   let url = href.pathname ?? "/";
   if (href.query) {
-    const params = new URLSearchParams(href.query);
-    url += `?${params.toString()}`;
+    const params = urlQueryToSearchParams(href.query);
+    url = appendSearchParamsToUrl(url, params);
   }
   return url;
 }
@@ -279,6 +280,12 @@ function applyLocaleToHref(href: string, locale: string | false | undefined): st
 
   if (locale === undefined) {
     // No locale prop: keep current behavior (href as-is)
+    return href;
+  }
+
+  // Absolute and protocol-relative URLs must not be prefixed — locale
+  // only applies to local paths.
+  if (href.startsWith("http://") || href.startsWith("https://") || href.startsWith("//")) {
     return href;
   }
 

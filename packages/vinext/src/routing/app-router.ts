@@ -21,6 +21,7 @@ import {
   scanWithExtensions,
   type ValidFileMatcher,
 } from "./file-matcher.js";
+import { validateRoutePatterns } from "./route-validation.js";
 
 export interface InterceptingRoute {
   /** The interception convention: "." | ".." | "../.." | "..." */
@@ -174,6 +175,15 @@ export async function appRouter(
   // a route at /parallel-routes/demographics.
   const slotSubRoutes = discoverSlotSubRoutes(routes, appDir, matcher);
   routes.push(...slotSubRoutes);
+
+  validateRoutePatterns(routes.map((route) => route.pattern));
+  validateRoutePatterns(
+    routes.flatMap((route) =>
+      route.parallelSlots.flatMap((slot) =>
+        slot.interceptingRoutes.map((intercept) => intercept.targetPattern),
+      ),
+    ),
+  );
 
   // Sort: static routes first, then dynamic, then catch-all
   routes.sort(compareRoutes);
