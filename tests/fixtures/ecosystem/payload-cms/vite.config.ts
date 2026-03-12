@@ -68,9 +68,6 @@ export default defineConfig({
           "@payloadcms/ui",
           "@payloadcms/next",
           "prettier",
-          "@payloadcms/db-d1-sqlite",
-          "@payloadcms/drizzle",
-          "drizzle-kit",
         ],
         esbuildOptions: {
           conditions: ["node", "import", "module", "browser", "default"],
