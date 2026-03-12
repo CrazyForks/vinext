@@ -476,9 +476,9 @@ async function buildApp() {
   }
 
   // Use runtime-confirmed classifications from pre-rendering when available.
-  // For App Router builds (which skip pre-rendering) or when pre-rendering
-  // produced no classifications, fall back to static source analysis so the
-  // build report still shows accurate route types without any server round-trip.
+  // For App Router builds (which skip pre-rendering entirely and return an
+  // empty routeClassifications map), fall back to static source analysis so
+  // the build report still shows accurate route types.
   const knownRoutes =
     prerenderResult.routeClassifications.size > 0
       ? prerenderResult.routeClassifications

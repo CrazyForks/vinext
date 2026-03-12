@@ -1200,7 +1200,10 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
           // would be a serious correctness bug. Using 1 hour + stale-while-revalidate
           // limits worst-case stale time to ~2 hours for misclassified ISR pages,
           // while still giving CDNs a useful caching signal for truly static content.
-          "Cache-Control": "s-maxage=3600, stale-while-revalidate",
+          // stale-while-revalidate=86400: per RFC 5861 the directive requires an
+          // explicit delta-seconds value — bare `stale-while-revalidate` is treated
+          // as =0 by Cloudflare (no stale serving), defeating the intent.
+          "Cache-Control": "s-maxage=3600, stale-while-revalidate=86400",
         };
         // Always respond 200 for pre-rendered pages. middlewareRewriteStatus
         // records the status from a NextResponse.rewrite() call — that value

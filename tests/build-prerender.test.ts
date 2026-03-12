@@ -45,6 +45,8 @@ describe.skipIf(!fixtureBuilt)("Production server — serves pre-rendered HTML",
   let baseUrl: string;
 
   beforeAll(async () => {
+    // Clear any stale files left by a previous failed run before creating test fixtures.
+    fs.rmSync(pagesDir, { recursive: true, force: true });
     // Create a fake pre-rendered HTML file at dist/server/pages/prerendered-test.html
     fs.mkdirSync(pagesDir, { recursive: true });
     fs.writeFileSync(
@@ -100,7 +102,7 @@ describe.skipIf(!fixtureBuilt)("Production server — serves pre-rendered HTML",
   it("serves pre-rendered HTML with Cache-Control header for CDN caching", async () => {
     const res = await fetch(`${baseUrl}/prerendered-test`);
     expect(res.status).toBe(200);
-    expect(res.headers.get("cache-control")).toBe("s-maxage=3600, stale-while-revalidate");
+    expect(res.headers.get("cache-control")).toBe("s-maxage=3600, stale-while-revalidate=86400");
     await res.text(); // consume body
   });
 
@@ -184,7 +186,7 @@ describe("prerenderStaticPages — function exists", () => {
     expect(typeof mod.prerenderStaticPages).toBe("function");
   });
 
-  it("PrerenderResult type is returned", async () => {
+  it.skipIf(!fixtureBuilt)("PrerenderResult type is returned", async () => {
     const { prerenderStaticPages } = await import("../packages/vinext/src/build/static-export.js");
     // Call with the pages-basic fixture which has a built dist/
     const result = await prerenderStaticPages({ root: PAGES_FIXTURE });
