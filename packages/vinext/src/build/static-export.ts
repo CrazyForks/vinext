@@ -587,8 +587,11 @@ function buildUrlFromParams(pattern: string, params: Record<string, string | str
  */
 export function getOutputPath(urlPath: string, trailingSlash: boolean, outDir: string): string {
   if (urlPath === "/") {
-    // Root always maps to "index.html" — no traversal possible, no need
-    // to run the boundary check below.
+    // INVARIANT: this early return must stay above the boundary check below.
+    // Root maps to "index.html" — no traversal is possible for "/", so the
+    // startsWith check is unnecessary. (path.resolve("/tmp/out", "index.html")
+    // would pass anyway, so removing this early return would not change
+    // behaviour — but keeping it makes the common case explicit and fast.)
     return "index.html";
   }
 

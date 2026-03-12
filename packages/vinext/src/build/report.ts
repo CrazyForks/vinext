@@ -37,6 +37,20 @@ export interface RouteRow {
 
 // ─── Regex-based export detection ────────────────────────────────────────────
 
+// Shared regex builders — a single source of truth for the fn/var patterns
+// used by both hasNamedExport and isLocallyDefinedExport. Extracting them here
+// prevents the two functions from silently drifting if the pattern is ever
+// updated (e.g. to handle `export declare function` or TypeScript's
+// `export const foo: Foo = ...`).
+
+function makeFnRe(name: string): RegExp {
+  return new RegExp(`(?:^|\\n)\\s*export\\s+(?:async\\s+)?function\\s+${name}\\b`);
+}
+
+function makeVarRe(name: string): RegExp {
+  return new RegExp(`(?:^|\\n)\\s*export\\s+(?:const|let|var)\\s+${name}\\s*[=:]`);
+}
+
 /**
  * Returns true if the source code contains a named export with the given name.
  * Handles all three common export forms:
@@ -46,12 +60,10 @@ export interface RouteRow {
  */
 export function hasNamedExport(code: string, name: string): boolean {
   // Function / generator / async function declaration
-  const fnRe = new RegExp(`(?:^|\\n)\\s*export\\s+(?:async\\s+)?function\\s+${name}\\b`);
-  if (fnRe.test(code)) return true;
+  if (makeFnRe(name).test(code)) return true;
 
   // Variable declaration (const / let / var)
-  const varRe = new RegExp(`(?:^|\\n)\\s*export\\s+(?:const|let|var)\\s+${name}\\s*[=:]`);
-  if (varRe.test(code)) return true;
+  if (makeVarRe(name).test(code)) return true;
 
   // Re-export specifier: export { foo } or export { foo as bar }
   const reRe = new RegExp(`export\\s*\\{[^}]*\\b${name}\\b[^}]*\\}`);
@@ -70,19 +82,18 @@ export function hasNamedExport(code: string, name: string): boolean {
  * A re-exported one (`export { getStaticProps } from './data'`) has its
  * implementation in another module — we cannot inspect its revalidate value.
  *
- * Implemented by checking only the fn/var branches of `hasNamedExport`,
- * deliberately excluding the re-export `{ foo }` branch.
+ * Uses the same fn/var regex builders as `hasNamedExport` (via `makeFnRe` /
+ * `makeVarRe`) so the two functions always use identical patterns.
+ * Deliberately excludes the re-export `{ foo }` branch.
  */
 export function isLocallyDefinedExport(code: string, name: string): boolean {
   // Function / generator / async function declaration
-  const fnRe = new RegExp(`(?:^|\\n)\\s*export\\s+(?:async\\s+)?function\\s+${name}\\b`);
-  if (fnRe.test(code)) return true;
+  if (makeFnRe(name).test(code)) return true;
 
   // Variable declaration (const / let / var).
   // Note: intentionally omits the re-export `export { name }` form — that
   // indicates the implementation lives in another module, not locally here.
-  const varRe = new RegExp(`(?:^|\\n)\\s*export\\s+(?:const|let|var)\\s+${name}\\s*[=:]`);
-  return varRe.test(code);
+  return makeVarRe(name).test(code);
 }
 
 /**
