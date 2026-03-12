@@ -152,6 +152,10 @@ describe.skipIf(!fixtureBuilt)("Production server — serves pre-rendered HTML",
   });
 
   it("serves pre-rendered index.html for /", async () => {
+    // This test creates the file AFTER the server starts. It works because
+    // resolvePrerenderedHtml calls fs.existsSync on every request rather than
+    // caching the directory listing at startup — so new files are picked up
+    // immediately without a server restart.
     const indexFile = path.join(pagesDir, "index.html");
     fs.writeFileSync(
       indexFile,

@@ -29,7 +29,7 @@ import {
 } from "../config/next-config.js";
 import { pagesRouter, apiRouter } from "../routing/pages-router.js";
 import { appRouter } from "../routing/app-router.js";
-import { classifyPagesRoute, type RouteType } from "./report.js";
+import { classifyPagesRoute, classifyAppRoute, type RouteType } from "./report.js";
 import { safeJsonStringify } from "../server/html.js";
 import { escapeAttr } from "../shims/head.js";
 import path from "node:path";
@@ -56,11 +56,21 @@ async function createTempViteServer(
   const vite = await import("vite");
   const { default: vinextPlugin } = await import("../index.js");
 
-  // Pass appDir: root so the plugin resolves @vitejs/plugin-rsc from the
-  // project root (not process.cwd() which is the monorepo root when running
-  // tests). Without this, earlyAppDirExists is checked against process.cwd()
-  // and returns false, so the RSC plugin is never loaded and App Router
-  // requests get 404s from the dev server.
+  // `appDir: root` is a workaround for earlyBaseDir initialisation order.
+  //
+  // vinextPlugin() captures `earlyBaseDir = appDir ?? process.cwd()` at
+  // *construction time*, before the Vite `config()` hook fires and before
+  // `root` is known to the plugin. That value is used to resolve
+  // @vitejs/plugin-rsc from the project's own node_modules. Without it, when
+  // this function is invoked from tests (where process.cwd() is the monorepo
+  // root), earlyAppDirExists evaluates to false, rscPluginPromise is set to
+  // null, and the RSC middleware is never loaded — causing all App Router
+  // requests to return 404.
+  //
+  // Passing `appDir: root` ensures earlyBaseDir equals the fixture/project root
+  // so @vitejs/plugin-rsc resolves from the correct node_modules. The value
+  // is semantically the project root here, not necessarily a directory named
+  // "app/" — it overrides the default process.cwd() fallback only.
   const server = await vite.createServer({
     root,
     configFile: false,
@@ -817,7 +827,6 @@ export async function staticExportApp(
 
         // Has generateStaticParams — statically pre-rendered at build time.
         // Use classifyAppRoute to pick up any explicit revalidate config.
-        const { classifyAppRoute } = await import("./report.js");
         result.routeClassifications.set(
           route.pattern,
           classifyAppRoute(route.pagePath, route.routePath, route.isDynamic),
@@ -831,7 +840,6 @@ export async function staticExportApp(
       }
     } else {
       // Static route — classify and queue for rendering
-      const { classifyAppRoute } = await import("./report.js");
       result.routeClassifications.set(
         route.pattern,
         classifyAppRoute(route.pagePath, route.routePath, route.isDynamic),

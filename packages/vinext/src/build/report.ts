@@ -69,17 +69,20 @@ export function hasNamedExport(code: string, name: string): boolean {
  * `getStaticProps` has its `revalidate` value readable in this file.
  * A re-exported one (`export { getStaticProps } from './data'`) has its
  * implementation in another module — we cannot inspect its revalidate value.
+ *
+ * Implemented by checking only the fn/var branches of `hasNamedExport`,
+ * deliberately excluding the re-export `{ foo }` branch.
  */
 export function isLocallyDefinedExport(code: string, name: string): boolean {
   // Function / generator / async function declaration
   const fnRe = new RegExp(`(?:^|\\n)\\s*export\\s+(?:async\\s+)?function\\s+${name}\\b`);
   if (fnRe.test(code)) return true;
 
-  // Variable declaration (const / let / var)
+  // Variable declaration (const / let / var).
+  // Note: intentionally omits the re-export `export { name }` form — that
+  // indicates the implementation lives in another module, not locally here.
   const varRe = new RegExp(`(?:^|\\n)\\s*export\\s+(?:const|let|var)\\s+${name}\\s*[=:]`);
-  if (varRe.test(code)) return true;
-
-  return false;
+  return varRe.test(code);
 }
 
 /**
