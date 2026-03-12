@@ -1341,10 +1341,7 @@ export async function classifyRoutesFromSource(
   const pagesDir = pagesDirCandidates.find((d) => fs.existsSync(d));
 
   if (pagesDir) {
-    const [pageRoutes, apiRoutes] = await Promise.all([
-      pagesRouter(pagesDir),
-      apiRouter(pagesDir),
-    ]);
+    const [pageRoutes, apiRoutes] = await Promise.all([pagesRouter(pagesDir), apiRouter(pagesDir)]);
 
     for (const route of apiRoutes) {
       routeClassifications.set(route.pattern, { type: "api" });
