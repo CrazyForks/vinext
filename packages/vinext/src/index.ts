@@ -233,7 +233,6 @@ function extractStaticValue(node: any): unknown {
   }
 }
 
-
 type UserResolveConfigWithTsconfigPaths = NonNullable<UserConfig["resolve"]> & {
   tsconfigPaths?: boolean;
 };
