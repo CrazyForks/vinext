@@ -265,6 +265,8 @@ export async function staticExportPages(options: StaticExportOptions): Promise<S
   // Render each page
   for (const { route, urlPath, params } of pagesToRender) {
     try {
+      // renderStaticPage always returns HTML (in-process rendering, not fetched over HTTP)
+      // so no Content-Type check is needed, unlike the HTTP-based export paths.
       const html = await renderStaticPage({
         server,
         route,
@@ -1044,7 +1046,7 @@ export async function runStaticExport(
       }
 
       return {
-        pageCount: appResult.pageCount + pagesResult.pageCount,
+        pageCount: appResult.pageCount + pagesResult.pageCount - collisionWarnings.length,
         files: [
           // Deduplicate: for colliding paths, pagesResult wins (it was written
           // second, overwriting the app result file on disk). Emit only the
@@ -1101,9 +1103,9 @@ export interface PrerenderResult {
 /**
  * Pre-render static pages after a production build.
  *
- * Starts a temporary production server, detects static routes via a temporary
- * Vite dev server, fetches each static page, and writes the HTML to
- * dist/server/pages/.
+ * Detects static routes via source-file inspection (regex-based, no dev
+ * server), starts a temporary production server, fetches each static page,
+ * and writes the HTML to dist/server/pages/.
  *
  * Only runs for Pages Router builds. App Router builds skip pre-rendering
  * because the App Router prod server delegates entirely to the RSC handler
@@ -1295,8 +1297,9 @@ async function collectStaticRoutesFromSource(root: string): Promise<CollectedRou
       }
 
       urls.push(route.pattern);
-    } catch {
-      skipped.push(`${route.pattern} (failed to read source)`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      skipped.push(`${route.pattern} (failed to read source: ${msg})`);
     }
   }
 

@@ -180,3 +180,43 @@ describe("runStaticExport — Hybrid (app/ + pages/)", () => {
     expect(skipWarning).toBeUndefined();
   });
 });
+
+// ─── trailingSlash: true ──────────────────────────────────────────────────────
+
+describe("runStaticExport — trailingSlash: true", () => {
+  let result: StaticExportResult;
+  const outDir = path.resolve(PAGES_FIXTURE, "out-run-static-trailing-slash");
+
+  beforeAll(async () => {
+    result = await runStaticExport({
+      root: PAGES_FIXTURE,
+      outDir,
+      // trailingSlash: true → pages are written as about/index.html, not about.html
+      configOverride: { output: "export", trailingSlash: true },
+    });
+  }, 60_000);
+
+  afterAll(() => {
+    fs.rmSync(outDir, { recursive: true, force: true });
+  });
+
+  it("writes about/index.html instead of about.html", () => {
+    expect(result.files).toContain("about/index.html");
+    expect(fs.existsSync(path.join(outDir, "about/index.html"))).toBe(true);
+    // about.html should NOT be present
+    expect(result.files).not.toContain("about.html");
+    expect(fs.existsSync(path.join(outDir, "about.html"))).toBe(false);
+  });
+
+  it("writes index.html at root (unchanged for trailingSlash)", () => {
+    expect(result.files).toContain("index.html");
+    expect(fs.existsSync(path.join(outDir, "index.html"))).toBe(true);
+  });
+
+  it("every listed file exists on disk", () => {
+    for (const file of result.files) {
+      const fullPath = path.join(outDir, file);
+      expect(fs.existsSync(fullPath), `expected ${file} to exist`).toBe(true);
+    }
+  });
+});
