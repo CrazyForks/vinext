@@ -416,6 +416,9 @@ async function buildApp() {
   }
 
   // ── Static export (output: "export") ──────────────────────────
+  // Dynamic import: lazily load config resolution only when needed.
+  // vinext dev / vinext start don't reach this code path, so keeping
+  // this as a dynamic import avoids paying the parse cost on every CLI startup.
   const { loadNextConfig, resolveNextConfig } = await import(
     /* @vite-ignore */ "./config/next-config.js"
   );

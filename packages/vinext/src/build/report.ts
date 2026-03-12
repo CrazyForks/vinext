@@ -61,6 +61,28 @@ export function hasNamedExport(code: string, name: string): boolean {
 }
 
 /**
+ * Returns true if the source code contains a named export that is locally
+ * defined in this file (function declaration or variable assignment), as
+ * opposed to a re-export from another module (`export { foo } from '...'`).
+ *
+ * This distinction matters for `getStaticProps`: a locally-defined
+ * `getStaticProps` has its `revalidate` value readable in this file.
+ * A re-exported one (`export { getStaticProps } from './data'`) has its
+ * implementation in another module — we cannot inspect its revalidate value.
+ */
+export function isLocallyDefinedExport(code: string, name: string): boolean {
+  // Function / generator / async function declaration
+  const fnRe = new RegExp(`(?:^|\\n)\\s*export\\s+(?:async\\s+)?function\\s+${name}\\b`);
+  if (fnRe.test(code)) return true;
+
+  // Variable declaration (const / let / var)
+  const varRe = new RegExp(`(?:^|\\n)\\s*export\\s+(?:const|let|var)\\s+${name}\\s*[=:]`);
+  if (varRe.test(code)) return true;
+
+  return false;
+}
+
+/**
  * Extracts the string value of `export const <name> = "value"`.
  * Handles optional TypeScript type annotations:
  *   export const dynamic: string = "force-dynamic"
@@ -146,6 +168,15 @@ export function classifyPagesRoute(filePath: string): {
   }
 
   if (hasNamedExport(code, "getStaticProps")) {
+    // If getStaticProps is a re-export from another module (e.g.
+    // `export { getStaticProps } from './data'`), the revalidate value lives in
+    // that other module — we cannot inspect it here. Conservatively treat
+    // re-exported getStaticProps as ISR so the page is skipped during
+    // pre-rendering rather than pinned with a year-long cache header.
+    if (!isLocallyDefinedExport(code, "getStaticProps")) {
+      return { type: "isr" };
+    }
+
     const revalidate = extractGetStaticPropsRevalidate(code);
 
     if (revalidate === null || revalidate === false || revalidate === Infinity) {

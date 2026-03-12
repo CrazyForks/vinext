@@ -1185,8 +1185,15 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
         const html = await fs.promises.readFile(pagesPrerenderedFile, "utf-8");
         const prerenderedHeaders: Record<string, string | string[]> = {
           ...middlewareHeaders,
-          // Static pages are immutable between builds — allow long-lived CDN caching.
-          "Cache-Control": "s-maxage=31536000, stale-while-revalidate",
+          // Conservative cache TTL for pre-rendered pages. A year-long cache
+          // (s-maxage=31536000) would be ideal for truly static pages, but
+          // collectStaticRoutesFromSource has known false-negative cases for
+          // ISR detection (re-exported getStaticProps, variable-based revalidate).
+          // If an ISR page with revalidate:60 slips through, a year-long CDN pin
+          // would be a serious correctness bug. Using 1 hour + stale-while-revalidate
+          // limits worst-case stale time to ~2 hours for misclassified ISR pages,
+          // while still giving CDNs a useful caching signal for truly static content.
+          "Cache-Control": "s-maxage=3600, stale-while-revalidate",
         };
         // Always respond 200 for pre-rendered pages. middlewareRewriteStatus
         // records the status from a NextResponse.rewrite() call — that value

@@ -59,11 +59,7 @@ async function createTempViteServer(
   const server = await vite.createServer({
     root,
     configFile: false,
-    // Pass appDir so the plugin resolves app/ relative to the project being
-    // exported, not process.cwd(). Omitting it causes the plugin to fall back
-    // to process.cwd() for early app-dir detection, which points to the
-    // monorepo/CLI root rather than the fixture directory.
-    plugins: [vinextPlugin({ appDir: root })],
+    plugins: [vinextPlugin()],
     optimizeDeps: { holdUntilCrawlEnd: true },
     server: { port: 0, cors: false },
     logLevel: "silent",
@@ -1209,7 +1205,11 @@ export async function prerenderStaticPages(options: PrerenderOptions): Promise<P
 
         result.files.push(outputPath);
         result.pageCount++;
-        // Runtime-confirmed static: the page was successfully fetched and written.
+        // Key by urlPath (= route.pattern for non-dynamic routes, which are the
+        // only ones pre-rendered here). If dynamic route pre-rendering is ever
+        // added, urlPath would be /blog/hello-world while pattern is /blog/:slug
+        // — at that point this set call should use route.pattern instead, and
+        // the pre-rendered URL should be stored separately.
         result.routeClassifications.set(urlPath, { type: "static" });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

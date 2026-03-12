@@ -73,12 +73,12 @@ describe.skipIf(!fixtureBuilt)("Production server — serves pre-rendered HTML",
     if (server) {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
-    // Clean up the fake pre-rendered file and pages directory
-    if (fs.existsSync(prerenderedFile)) {
-      fs.rmSync(prerenderedFile);
-    }
-    if (fs.existsSync(pagesDir) && fs.readdirSync(pagesDir).length === 0) {
-      fs.rmdirSync(pagesDir);
+    // Recursively clean all test-created files under pagesDir.
+    // Using recursive removal protects against stale files left behind if a
+    // test fails between writeFileSync and its own finally block (e.g. the
+    // nested pre-rendered HTML test or the index.html test).
+    if (fs.existsSync(pagesDir)) {
+      fs.rmSync(pagesDir, { recursive: true, force: true });
     }
   });
 
@@ -98,7 +98,7 @@ describe.skipIf(!fixtureBuilt)("Production server — serves pre-rendered HTML",
   it("serves pre-rendered HTML with Cache-Control header for CDN caching", async () => {
     const res = await fetch(`${baseUrl}/prerendered-test`);
     expect(res.status).toBe(200);
-    expect(res.headers.get("cache-control")).toBe("s-maxage=31536000, stale-while-revalidate");
+    expect(res.headers.get("cache-control")).toBe("s-maxage=3600, stale-while-revalidate");
     await res.text(); // consume body
   });
 
