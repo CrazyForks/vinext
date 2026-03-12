@@ -1,0 +1,20 @@
+{
+  "name": "ecosystem-payload-cms",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "payload": "^3.42.0",
+    "@payloadcms/next": "^3.42.0",
+    "@payloadcms/richtext-lexical": "^3.42.0",
+    "@payloadcms/db-sqlite": "^3.42.0",
+    "graphql": "^16.10.0",
+    "vinext": "workspace:*",
+    "@vitejs/plugin-rsc": "^0.5.19",
+    "react-server-dom-webpack": "^19.2.4"
+  },
+  "devDependencies": {
+    "vite": "^7.3.1"
+  }
+}

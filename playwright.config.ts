@@ -107,6 +107,17 @@ const projectServers = {
       timeout: 30_000,
     },
   },
+  "payload-cms": {
+    testDir: "./tests/e2e/payload-cms",
+    use: { baseURL: "http://localhost:4180" },
+    server: {
+      command: "npx vite --port 4180",
+      cwd: "./tests/fixtures/ecosystem/payload-cms",
+      port: 4180,
+      reuseExistingServer: !process.env.CI,
+      timeout: 60_000,
+    },
+  },
 };
 
 type ProjectName = keyof typeof projectServers;

@@ -67,6 +67,61 @@ import commonjs from "vite-plugin-commonjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
+ * Resolve a package to an absolute path by walking pnpm's symlinked
+ * node_modules tree. pnpm's strict hoisting means a package may not be
+ * reachable from the project root but IS reachable from a transitive
+ * dependency's directory. We walk one level deep through all symlinked
+ * packages in `<root>/node_modules` and try require.resolve from each one.
+ *
+ * This is used as a deep fallback in vinext:client-package-proxy-resolve
+ * when a bare specifier inside a virtual proxy module can't be resolved
+ * from the project root.
+ */
+async function resolvePackageDeep(pkgName: string, root: string): Promise<string | null> {
+  const nodeModulesDir = path.join(root, "node_modules");
+  if (!fs.existsSync(nodeModulesDir)) return null;
+
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(nodeModulesDir);
+  } catch {
+    return null;
+  }
+
+  for (const entry of entries) {
+    // Handle scoped packages (@scope/pkg)
+    if (entry.startsWith("@")) {
+      let scopedEntries: string[];
+      try {
+        scopedEntries = fs.readdirSync(path.join(nodeModulesDir, entry));
+      } catch {
+        continue;
+      }
+      for (const scopedPkg of scopedEntries) {
+        try {
+          const pkgDir = path.join(nodeModulesDir, entry, scopedPkg);
+          const realDir = fs.realpathSync(pkgDir);
+          const req = createRequire(path.join(realDir, "package.json"));
+          return req.resolve(pkgName);
+        } catch {
+          // not found here, continue
+        }
+      }
+    } else {
+      try {
+        const pkgDir = path.join(nodeModulesDir, entry);
+        const realDir = fs.realpathSync(pkgDir);
+        const req = createRequire(path.join(realDir, "package.json"));
+        return req.resolve(pkgName);
+      } catch {
+        // not found here, continue
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Fetch Google Fonts CSS, download .woff2 files, cache locally, and return
  * @font-face CSS with local file references.
  *
@@ -716,6 +771,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
   let hasCloudflarePlugin = false;
   let hasNitroPlugin = false;
 
+
   // Resolve shim paths - works both from source (.ts) and built (.js)
   const shimsDir = path.resolve(__dirname, "shims");
 
@@ -830,6 +886,482 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
     // Transform CJS require()/module.exports to ESM before other plugins
     // analyze imports (RSC directive scanning, shim resolution, etc.)
     commonjs(),
+    // Stub CSS imports in server/RSC environments. Packages like
+     // Stub plain `.css` imports in non-client (RSC/SSR) environments.
+     //
+     // @payloadcms/ui and similar libraries import plain .css files. In RSC/SSR
+     // environments Vite's CSS pipeline still runs, but the resulting module has
+     // no exports — which is fine. However, some CSS files trigger PostCSS/preprocessor
+     // errors when processed outside the client environment. We intercept plain .css
+     // imports and return an empty module to avoid these errors.
+     //
+     // CSS Modules (.module.css) are intentionally excluded: Vite natively returns
+     // a class-name map object for .module.css in server environments via
+     // `vite:css-post` (consumer === "server" path), which server components need
+     // to access style class names. We must not stub those.
+     //
+     // Note: intentionally does NOT check options?.ssr — in the RSC
+     // environment that flag is absent, so we gate on environment name.
+     {
+       name: "vinext:stub-server-css",
+       enforce: "pre" as const,
+       resolveId(id: string) {
+         if (
+           (this as any).environment?.name !== "client" &&
+           typeof id === "string" &&
+           !id.includes(".module.css") &&
+           (id.endsWith(".css") || id.includes(".css?"))
+         ) {
+           return "\0virtual:vinext-empty-css";
+         }
+       },
+       load(id: string) {
+         if (id === "\0virtual:vinext-empty-css") {
+           return { code: "" };
+         }
+       },
+     },
+    // Fix 'use server' closure variable collision with local declarations.
+    //
+    // @vitejs/plugin-rsc uses `periscopic` to find closure variables for
+    // 'use server' inline functions. Due to how periscopic handles block scopes,
+    // `const X = ...` declared inside a 'use server' function body is tracked in
+    // the BlockStatement scope (not the FunctionDeclaration scope). When periscopic
+    // searches for the owner of a reference `X`, it finds the block scope — which
+    // is neither the function scope nor the module scope — so it incorrectly
+    // classifies `X` as a closure variable from the outer scope.
+    //
+    // The result: plugin-rsc injects `const [X] = await decryptActionBoundArgs(...)`
+    // at the top of the hoisted function, colliding with the existing `const X = ...`
+    // declaration in the body. This causes a SyntaxError.
+    //
+    // Fix: before plugin-rsc sees the file, detect any 'use server' function whose
+    // local `const/let/var` declarations shadow an outer-scope variable, and rename
+    // the inner declarations (+ usages within that function) to `__local_X`. This
+    // eliminates the collision without changing semantics.
+    //
+    // This is a general fix that works for any library — not just @payloadcms/next.
+    {
+      name: "vinext:fix-use-server-closure-collision",
+      enforce: "pre" as const,
+      transform(code: string, id: string) {
+        // Quick bail-out: only files that contain 'use server' inline
+        if (!code.includes("use server")) return null;
+        // Only JS/TS files
+        if (!/\.(js|jsx|ts|tsx|mjs|cjs)$/.test(id.split("?")[0])) return null;
+
+        let ast: any;
+        try {
+          ast = parseAst(code);
+        } catch {
+          return null;
+        }
+
+        // Collect all variable names declared in a given AST subtree (non-recursive
+        // into nested functions). Handles: VariableDeclaration, destructuring patterns.
+        function collectDeclaredNames(node: any, stopAtFunctions = true): Set<string> {
+          const names = new Set<string>();
+          function walk(n: any) {
+            if (!n || typeof n !== "object") return;
+            if (stopAtFunctions && n !== node && (
+              n.type === "FunctionDeclaration" ||
+              n.type === "FunctionExpression" ||
+              n.type === "ArrowFunctionExpression"
+            )) return;
+            if (n.type === "VariableDeclaration") {
+              for (const decl of n.declarations) {
+                collectPatternNames(decl.id, names);
+              }
+            }
+            if (n.type === "FunctionDeclaration" && n.id) {
+              // Function declarations are hoisted to the outer scope
+              // only if we're not inside a function body already
+            }
+            for (const key of Object.keys(n)) {
+              if (key === "type") continue;
+              const child = n[key];
+              if (Array.isArray(child)) {
+                for (const c of child) walk(c);
+              } else if (child && typeof child === "object" && child.type) {
+                walk(child);
+              }
+            }
+          }
+          walk(node);
+          return names;
+        }
+
+        function collectPatternNames(pattern: any, names: Set<string>) {
+          if (!pattern) return;
+          if (pattern.type === "Identifier") {
+            names.add(pattern.name);
+          } else if (pattern.type === "ObjectPattern") {
+            for (const prop of pattern.properties) {
+              collectPatternNames(prop.value ?? prop.argument, names);
+            }
+          } else if (pattern.type === "ArrayPattern") {
+            for (const elem of pattern.elements) {
+              collectPatternNames(elem, names);
+            }
+          } else if (pattern.type === "RestElement" || pattern.type === "AssignmentPattern") {
+            collectPatternNames(pattern.left ?? pattern.argument, names);
+          }
+        }
+
+        // Collect all identifier references used within a node (non-recursive into
+        // nested functions). Returns Set<name>.
+        function collectReferences(node: any): Set<string> {
+          const refs = new Set<string>();
+          function walk(n: any, isRoot = false) {
+            if (!n || typeof n !== "object") return;
+            if (!isRoot && (
+              n.type === "FunctionDeclaration" ||
+              n.type === "FunctionExpression" ||
+              n.type === "ArrowFunctionExpression"
+            )) return;
+            if (n.type === "Identifier") {
+              refs.add(n.name);
+            }
+            for (const key of Object.keys(n)) {
+              if (key === "type") continue;
+              const child = n[key];
+              if (Array.isArray(child)) {
+                for (const c of child) walk(c);
+              } else if (child && typeof child === "object" && child.type) {
+                walk(child);
+              }
+            }
+          }
+          walk(node, true);
+          return refs;
+        }
+
+        // Check if a block body starts with 'use server' directive
+        function hasUseServerDirective(body: any[]): boolean {
+          return body.some(
+            (stmt: any) =>
+              stmt.type === "ExpressionStatement" &&
+              stmt.expression?.type === "Literal" &&
+              stmt.expression.value === "use server",
+          );
+        }
+
+        // Collect outer scope variable names by walking up from a function node.
+        // We do this by collecting all variable names declared in all ancestor
+        // function/program bodies, stopping when we hit the use-server function itself.
+        function collectOuterNames(targetNode: any, ast: any): Set<string> {
+          const names = new Set<string>();
+          function walkProgram(n: any) {
+            if (!n || typeof n !== "object") return;
+            if (n === targetNode) return; // don't recurse into the target
+            if (n.type === "VariableDeclaration") {
+              for (const decl of n.declarations) {
+                collectPatternNames(decl.id, names);
+              }
+            }
+            for (const key of Object.keys(n)) {
+              if (key === "type") continue;
+              const child = n[key];
+              if (Array.isArray(child)) {
+                for (const c of child) walkProgram(c);
+              } else if (child && typeof child === "object" && child.type) {
+                walkProgram(child);
+              }
+            }
+          }
+          walkProgram(ast);
+          return names;
+        }
+
+        // Find all 'use server' inline functions and check for collisions
+        const s = new MagicString(code);
+        let changed = false;
+
+        function visitNode(node: any) {
+          if (!node || typeof node !== "object") return;
+          const isServerFn =
+            (node.type === "FunctionDeclaration" ||
+              node.type === "FunctionExpression" ||
+              node.type === "ArrowFunctionExpression") &&
+            node.body?.type === "BlockStatement" &&
+            hasUseServerDirective(node.body.body);
+
+          if (isServerFn) {
+            // Collect variables declared directly in the function's block body
+            // (these go into the BlockStatement scope in periscopic, not the function scope)
+            const localDecls = new Set<string>();
+            for (const stmt of node.body.body) {
+              if (stmt.type === "VariableDeclaration") {
+                for (const decl of stmt.declarations) {
+                  collectPatternNames(decl.id, localDecls);
+                }
+              }
+            }
+
+            if (localDecls.size === 0) {
+              // Visit children and return early
+              for (const key of Object.keys(node)) {
+                if (key === "type") continue;
+                const child = node[key];
+                if (Array.isArray(child)) { for (const c of child) visitNode(c); }
+                else if (child && typeof child === "object" && child.type) visitNode(child);
+              }
+              return;
+            }
+
+            // Collect outer-scope names
+            const outerNames = collectOuterNames(node, ast);
+
+            // Find collisions: names declared locally that also exist in outer scope
+            const collisions = new Set<string>();
+            for (const name of localDecls) {
+              if (outerNames.has(name)) {
+                collisions.add(name);
+              }
+            }
+
+            if (collisions.size > 0) {
+              // Rename each colliding local declaration within this function body only.
+              // We rename both the declaration sites and all references within the body.
+              // We do NOT rename references in nested functions (they capture the local).
+              for (const name of collisions) {
+                const renamed = `__local_${name}`;
+                // Rename all Identifier nodes named `name` within node.body
+                renamingWalk(node.body, name, renamed, new Set());
+              }
+              changed = true;
+            }
+          }
+
+          // Recurse into children (if not a server function we already handled above)
+          if (!isServerFn) {
+            for (const key of Object.keys(node)) {
+              if (key === "type") continue;
+              const child = node[key];
+              if (Array.isArray(child)) { for (const c of child) visitNode(c); }
+              else if (child && typeof child === "object" && child.type) visitNode(child);
+            }
+          }
+        }
+
+        // Walk an AST subtree renaming all Identifier nodes with a given name.
+        // Skips into nested functions (they keep their own binding).
+        // The `declared` set tracks whether the name was declared in a given
+        // nested scope — if a nested function re-declares it, don't rename there.
+        function renamingWalk(node: any, from: string, to: string, outerDeclared: Set<string>) {
+          if (!node || typeof node !== "object") return;
+
+          if (node.type === "Identifier" && node.name === from) {
+            s.update(node.start, node.end, to);
+            return;
+          }
+
+          // Don't recurse into nested functions that re-declare the same name
+          if (
+            node.type === "FunctionDeclaration" ||
+            node.type === "FunctionExpression" ||
+            node.type === "ArrowFunctionExpression"
+          ) {
+            // Check if this nested function re-declares `from` in its params or body
+            const nestedDecls = new Set<string>();
+            if (node.params) {
+              for (const p of node.params) collectPatternNames(p, nestedDecls);
+            }
+            if (node.body?.type === "BlockStatement") {
+              for (const stmt of node.body.body) {
+                if (stmt.type === "VariableDeclaration") {
+                  for (const d of stmt.declarations) collectPatternNames(d.id, nestedDecls);
+                }
+              }
+            }
+            if (nestedDecls.has(from)) {
+              // This nested function re-declares `from`, don't rename inside it
+              return;
+            }
+          }
+
+          for (const key of Object.keys(node)) {
+            if (key === "type" || key === "start" || key === "end") continue;
+            const child = node[key];
+            if (Array.isArray(child)) {
+              for (const c of child) renamingWalk(c, from, to, outerDeclared);
+            } else if (child && typeof child === "object" && child.type) {
+              renamingWalk(child, from, to, outerDeclared);
+            }
+          }
+        }
+
+        visitNode(ast);
+
+        if (!changed) return null;
+        return { code: s.toString(), map: s.generateMap({ hires: "boundary" }) };
+      },
+    },
+    // Sanitize Payload CMS's clientConfig before it reaches RootProvider ("use client").
+    //
+    // @payloadcms/next's RootLayout (a Server Component) calls getClientConfig() and
+    // passes the result to RootProvider. Despite createClientConfig() stripping
+    // top-level server-only fields, nested values still leak plain (non-server-reference)
+    // functions: field.label, field.validate, field.defaultValue, access.{read,create,...},
+    // endpoints[].handler, and RegExp instances (from lexical editor config).
+    //
+    // React's RSC Flight serializer throws for any of these:
+    //   - functions: "Functions cannot be passed directly to Client Components..."
+    //   - RegExp instances: "Only plain objects...can be passed...Classes or null prototypes
+    //     are not supported."
+    //
+    // Fix: intercept the RootLayout source file in the RSC transform pipeline and inject a
+    // call to vinext's sanitizeForRSC() deep-cleaner around `clientConfig` right before it
+    // is passed to RootProvider. The cleaner strips functions (→ undefined) and converts
+    // RegExp to their source string representation. This is safe — Payload's admin SPA
+    // reconstructs RegExp from string patterns client-side and ignores function values in
+    // clientConfig entirely.
+    {
+      name: "vinext:payload-sanitize-client-config",
+      enforce: "pre" as const,
+      transform(code: string, id: string) {
+        // Only intercept the Payload RootLayout file
+        if (!id.includes("@payloadcms/next") || !id.includes("layouts/Root/index")) return null;
+        // Quick bail-out: only if RootProvider is used
+        if (!code.includes("RootProvider") || !code.includes("clientConfig")) return null;
+
+        // The sanitizeForRSC helper: deep-walks an object, replacing
+        // functions with undefined and RegExp instances with their source string.
+        const HELPER = `
+function __vinextSanitizeForRSC(value, depth) {
+  if (depth === undefined) depth = 0;
+  if (depth > 20) return undefined;
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'function') return undefined;
+  if (value instanceof RegExp) return value.source;
+  if (Array.isArray(value)) return value.map(function(item) { return __vinextSanitizeForRSC(item, depth + 1); });
+  if (typeof value === 'object' && Object.prototype.toString.call(value) === '[object Object]') {
+    var result = {};
+    for (var key in value) {
+      if (Object.prototype.hasOwnProperty.call(value, key)) {
+        var cleaned = __vinextSanitizeForRSC(value[key], depth + 1);
+        if (cleaned !== undefined) result[key] = cleaned;
+      }
+    }
+    return result;
+  }
+  return value;
+}
+`;
+
+        const s = new MagicString(code);
+        // Inject helper at the top of the file
+        s.prepend(HELPER);
+        // Wrap every occurrence of `config: clientConfig,` (the prop passed to RootProvider)
+        // There should be exactly one, but replaceAll is safe.
+        const TARGET = "config: clientConfig,";
+        const REPLACEMENT = "config: __vinextSanitizeForRSC(clientConfig),";
+        let idx = code.indexOf(TARGET);
+        while (idx !== -1) {
+          s.overwrite(idx, idx + TARGET.length, REPLACEMENT);
+          idx = code.indexOf(TARGET, idx + 1);
+        }
+        if (!s.hasChanged()) return null;
+        return { code: s.toString(), map: s.generateMap({ hires: "boundary" }) };
+      },
+    },
+    // Fix @vitejs/plugin-rsc's client-package-proxy virtual modules.
+    //
+    // @vitejs/plugin-rsc generates virtual client-package-proxy modules for
+    // "use client" packages (e.g. @payloadcms/ui). These are referenced in RSC
+    // transforms with IDs like:
+    //   /@id/__x00__virtual:vite-rsc/client-package-proxy/@payloadcms/ui
+    //
+    // Problem 1: The plugin has a `load` hook for the resolved form
+    //   \0virtual:vite-rsc/client-package-proxy/@payloadcms/ui
+    // but NO corresponding `resolveId` hook. Vite's fetchModule calls resolveId
+    // before load, so without a resolver the module is never found.
+    //
+    // Problem 2: Even when the `load` hook fires, it generates:
+    //   export {ProgressBar, RootProvider} from "@payloadcms/ui"
+    // Virtual modules have no real filesystem location, so this bare specifier
+    // can't be resolved — especially with pnpm's strict hoisting where
+    // @payloadcms/ui is only reachable from @payloadcms/next's subtree.
+    //
+    // Fix:
+    // - resolveId Fix 1: map bare/prefixed virtual ID → \0-prefixed canonical ID.
+    // - resolveId Fix 2: catch bare package imports FROM virtual proxy modules and
+    //   resolve them via Vite's normal resolver chain (which includes
+    //   project-specific alias/resolveId plugins like resolve-payload-ui-client-only).
+    //
+    // IMPORTANT: Do NOT rewrite the proxy module's re-exports to absolute paths
+    // in a transform hook. If you bake in the absolute path (e.g. via resolving
+    // to /abs/path/to/index.js), Vite will serve that file WITHOUT the ?v=
+    // cache-busting hash that it adds to other module requests. The result is TWO
+    // separate module instances of the same file in the browser module graph —
+    // one at the bare absolute path and one at the versioned path. This breaks
+    // React context sharing: ServerFunctionsContext is created once per module
+    // instance, so the provider (from the bare-path instance) and the consumer
+    // (from the versioned instance) use different context objects, causing
+    // "useServerFunctions must be used within a ServerFunctionsProvider".
+    //
+    // Keeping the bare specifier in the re-export and letting Vite resolve it
+    // through the module graph ensures all imports share a single module instance
+    // with a consistent version hash.
+    {
+      name: "vinext:client-package-proxy-resolve",
+      enforce: "pre" as const,
+      resolveId: {
+        order: "pre" as const,
+        async handler(source: string, importer: string | undefined) {
+          // Fix 1: map bare/prefixed virtual ID → \0-prefixed canonical ID
+          const PREFIX = "virtual:vite-rsc/client-package-proxy/";
+          const clean = source.startsWith("\0") ? source.slice(1) : source;
+          if (clean.startsWith(PREFIX)) {
+            return "\0" + clean;
+          }
+
+          // Fix 2: resolve bare package specifiers imported from a virtual
+          // client-package-proxy module.
+          // The proxy module's load hook generates:
+          //   export {...} from "@payloadcms/ui"
+          // From a virtual module (no real file path), Vite can't resolve
+          // bare specifiers, especially with pnpm strict hoisting.
+          if (
+            importer?.startsWith("\0virtual:vite-rsc/client-package-proxy/") &&
+            !source.startsWith(".") &&
+            !source.startsWith("/") &&
+            !source.startsWith("\0")
+          ) {
+            // Try to resolve using Vite's normal resolution from the root.
+            // This goes through all other resolveId plugins, including any
+            // project-specific alias plugins (e.g. resolve-payload-ui-client-only).
+            // Using undefined as importer lets Vite resolve from the project root,
+            // which finds the package through resolve.alias or plugin resolveId hooks.
+            const resolved = await this.resolve(source, undefined, {
+              skipSelf: true,
+            });
+            if (resolved) return resolved;
+
+            // Fallback: try require.resolve with project root and common paths
+            try {
+              const { createRequire } = await import("node:module");
+              const req = createRequire(path.join(root, "index.js"));
+              const absPath = req.resolve(source);
+              return { id: absPath };
+            } catch {
+              // Could not resolve — fall through to let other plugins try
+            }
+
+            // Deep fallback: walk symlinked node_modules to find the package
+            // in a dependency's subtree (handles pnpm strict hoisting where
+            // the package isn't in the workspace root but is reachable via
+            // a transitive dependency's package.json).
+            try {
+              const absPath = await resolvePackageDeep(source, root);
+              if (absPath) return { id: absPath };
+            } catch {
+              // Could not resolve — fall through
+            }
+          }
+        },
+      },
+    },
     {
       name: "vinext:config",
       enforce: "pre",
@@ -1312,6 +1844,100 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               optimizeDeps: {
                 exclude: ["vinext", "@vercel/og"],
                 entries: appEntries,
+                esbuildOptions: {
+                  plugins: [
+                    // Patch react-server-dom-webpack-server.edge during pre-bundling:
+                    // Replace `throw Error('Functions cannot be passed directly to
+                    // Client Components...')` with `return "$undefined"`.
+                    //
+                    // Context: Payload CMS's `createClientConfig()` strips top-level
+                    // server-only fields but leaks nested functions (field.label,
+                    // field.validate, access.read, etc.) into the clientConfig object
+                    // passed to RootProvider ("use client"). React's RSC Flight
+                    // serializer throws when it encounters non-server-reference functions
+                    // in props. Returning the RSC protocol sentinel "$undefined" (which
+                    // the client deserializes as `undefined`) is safe — Payload's admin
+                    // SPA does not use these internal functions from clientConfig.
+                    {
+                      name: "vinext:patch-rsc-serializer",
+                      setup(build: any) {
+                        build.onLoad(
+                          { filter: /react-server-dom-webpack-server\.edge\.(development|production)\.js$/ },
+                          async (args: any) => {
+                            const fs = await import("node:fs/promises");
+                            let contents = await fs.readFile(args.path, "utf8");
+
+                            // -----------------------------------------------------------------
+                            // Patch 1: Handle non-serializable functions gracefully.
+                            //
+                            // Payload CMS's createClientConfig() leaks nested functions
+                            // (field.label, field.validate, access.read, etc.) that React's
+                            // RSC Flight serializer cannot transmit. Instead of throwing,
+                            // return the "$undefined" sentinel so the client receives undefined.
+                            // -----------------------------------------------------------------
+                            const FUNC_MARKER =
+                              'Functions cannot be passed directly to Client Components unless you explicitly expose it by marking it with "use server".';
+                            if (contents.includes(FUNC_MARKER)) {
+                              let replaced = contents;
+                              const THROW_MARKER = "throw Error(";
+                              let searchFrom = 0;
+                              while (true) {
+                                const markerIdx = replaced.indexOf(FUNC_MARKER, searchFrom);
+                                if (markerIdx === -1) break;
+                                const throwIdx = replaced.lastIndexOf(THROW_MARKER, markerIdx);
+                                if (throwIdx === -1) { searchFrom = markerIdx + 1; continue; }
+                                const between = replaced.slice(throwIdx + THROW_MARKER.length, markerIdx);
+                                if (between.trim() !== "" && !between.trim().startsWith("'")) {
+                                  searchFrom = markerIdx + 1;
+                                  continue;
+                                }
+                                let depth = 0;
+                                let closeIdx = -1;
+                                for (let i = throwIdx + THROW_MARKER.length - 1; i < replaced.length; i++) {
+                                  if (replaced[i] === "(") depth++;
+                                  else if (replaced[i] === ")") {
+                                    depth--;
+                                    if (depth === 0) { closeIdx = i; break; }
+                                  }
+                                }
+                                if (closeIdx === -1) { searchFrom = markerIdx + 1; continue; }
+                                const patch = 'return "$undefined" /* vinext: non-serializable function silently omitted */';
+                                replaced = replaced.slice(0, throwIdx) + patch + replaced.slice(closeIdx + 1);
+                                searchFrom = throwIdx + patch.length;
+                              }
+                              contents = replaced;
+                            }
+
+                            // -----------------------------------------------------------------
+                            // Patch 2: Handle RegExp instances gracefully.
+                            //
+                            // Payload CMS's lexical editor config contains RegExp instances
+                            // (regExp, importRegExp fields). React's RSC Flight serializer
+                            // throws for any object whose prototype is not Object.prototype.
+                            // RegExp falls into this category. We insert a guard clause that
+                            // converts RegExp to its source string (the only safe serializable
+                            // representation) right before the existing Date check, so the
+                            // throw is never reached for RegExp values.
+                            //
+                            // The insertion point is the `if (value instanceof Date)` line.
+                            // This is a stable anchor because React has always serialized
+                            // Date specially, and the structure is consistent across versions.
+                            // -----------------------------------------------------------------
+                            const DATE_CHECK = "if (value instanceof Date) return";
+                            if (contents.includes(DATE_CHECK)) {
+                              contents = contents.replace(
+                                DATE_CHECK,
+                                'if (value instanceof RegExp) return value.source; /* vinext: serialize RegExp as source string */ ' + DATE_CHECK,
+                              );
+                            }
+
+                            return { contents, loader: "js" };
+                          },
+                        );
+                      },
+                    },
+                  ],
+                },
               },
               build: {
                 outDir: "dist/server",
