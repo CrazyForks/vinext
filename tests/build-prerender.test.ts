@@ -25,12 +25,15 @@ if (!fixtureBuilt) {
 }
 
 // Sentinel: fail loudly in CI when the fixture hasn't been built instead of
-// silently passing an empty suite. The skipIf block above is for local dev
-// convenience only — CI must always build the fixture before running this file.
+// silently passing an empty suite. The skipIf block below is for local dev
+// convenience only — CI must always build the fixture before running this file
+// (the build step runs `pnpm build` inside the fixture directory).
 it("fixture must be built before running pre-render tests", () => {
   if (!fixtureBuilt) {
     throw new Error(
-      `Pre-render fixture not built. Run \`pnpm build\` inside ${PAGES_FIXTURE} before running this test file.`,
+      `Pre-render fixture not built.\n` +
+        `  Local dev: run \`pnpm build\` inside ${PAGES_FIXTURE}\n` +
+        `  CI: ensure the build step runs before the test step`,
     );
   }
 });
@@ -60,11 +63,10 @@ describe.skipIf(!fixtureBuilt)("Production server — serves pre-rendered HTML",
       const addr = server.address() as { port: number };
       baseUrl = `http://127.0.0.1:${addr.port}`;
     } catch (e) {
-      // Clean up test files if server startup fails so subsequent runs aren't affected
-      if (fs.existsSync(prerenderedFile)) fs.rmSync(prerenderedFile);
-      if (fs.existsSync(pagesDir) && fs.readdirSync(pagesDir).length === 0) {
-        fs.rmdirSync(pagesDir);
-      }
+      // Clean up test files if server startup fails so subsequent runs aren't affected.
+      // Use recursive removal for consistency with afterAll — targeted cleanup can miss
+      // files left by earlier failed tests.
+      fs.rmSync(pagesDir, { recursive: true, force: true });
       throw e;
     }
   });
@@ -190,6 +192,11 @@ describe("prerenderStaticPages — function exists", () => {
     expect(result).toHaveProperty("files");
     expect(result).toHaveProperty("warnings");
     expect(result).toHaveProperty("skipped");
+    // Verify the function actually ran and produced meaningful output — not
+    // just an empty early-return. The pages-basic fixture has at least one
+    // static page (index), so pageCount must be > 0.
+    expect(result.pageCount).toBeGreaterThan(0);
+    expect(result.files.length).toBeGreaterThan(0);
   });
 });
 

@@ -1334,7 +1334,6 @@ export async function classifyRoutesFromSource(
   const appDir = appDirCandidates.find((d) => fs.existsSync(d));
 
   if (appDir) {
-    const { classifyAppRoute } = await import("./report.js");
     const routes = await appRouter(appDir);
     for (const route of routes) {
       routeClassifications.set(
