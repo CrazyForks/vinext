@@ -10,48 +10,35 @@ import { Posts } from './collections/Posts'
 const filename = fileURLToPath(import.meta.url)
 const dirname = path.dirname(filename)
 
-// The D1 binding lives on the cloudflare:workers `env` object. We can't import
-// it at the top level because payload.config.ts may be evaluated before the
-// miniflare D1 binding is fully wired up. Instead, we use a Proxy that lazily
-// resolves the real D1 binding on first property access (which happens inside
-// connect() during payload.init(), well within a Workers request context).
+// Detect whether we're running in the Payload CLI (e.g., payload migrate:create).
+// In that context, cloudflare:workers is not available (no Workers runtime), so we
+// fall back to wrangler's getPlatformProxy which provides real D1 bindings from
+// the local .wrangler/state directory.
 //
-// The Proxy stores the resolved binding so resolution only happens once.
-let _resolvedBinding: any = null
-const d1BindingProxy = new Proxy(
-  {},
-  {
-    get(_target, prop, receiver) {
-      if (!_resolvedBinding) {
-        // cloudflare:workers is intercepted by @cloudflare/vite-plugin's module
-        // runner and returns the stable worker env. In production this is a real
-        // Workers binding. The `env` export is synchronously available here.
-        // We use a dynamic import promise chain but since connect() is async we
-        // can just resolve synchronously using the module cache via import().
-        // Actually: in the Workers module runner, `import()` of built-in virtual
-        // modules is synchronous (already in cache). This works in practice.
-        throw new Error(
-          '[payload-cms fixture] D1 binding accessed before cloudflare:workers env was ready. ' +
-          'This should not happen — connect() is called after Workers env is available.'
-        )
-      }
-      return Reflect.get(_resolvedBinding, prop, receiver)
-    },
-  },
+// In the Workers module runner (Vite dev / production Workers), cloudflare:workers
+// is available and provides the D1 binding directly.
+const isCLI = process.argv.some(
+  (v) => v.endsWith('/payload/bin.js') || v.endsWith('\\payload\\bin.js'),
 )
 
-// Initialize the D1 binding lazily when connect() is first called.
-// We monkey-patch the adapter after creation to intercept connect().
-// But since we can't easily do that, we instead pass an async binding getter
-// via a small shim object that connect.js can unwrap.
-//
-// Actually, the cleanest approach: pass a Promise that resolves to the binding.
-// But drizzle(binding) is synchronous...
-//
-// Final approach: use top-level await to resolve cloudflare:workers once at
-// module evaluation time. The module runner has env available immediately.
-const { env } = await import('cloudflare:workers')
-const d1Binding = (env as any).D1
+let d1Binding: any
+
+if (isCLI) {
+  // CLI mode: use wrangler's getPlatformProxy to get real D1 bindings.
+  // This allows `payload migrate:create`, `payload generate:types`, etc. to work.
+  const { getPlatformProxy } = await import('wrangler')
+  const proxy = await getPlatformProxy()
+  d1Binding = (proxy.env as any).D1
+} else {
+  // Workers runtime mode (Vite dev or deployed Workers).
+  // cloudflare:workers is intercepted by @cloudflare/vite-plugin in dev and is
+  // the real Workers runtime in production.
+  // Use an indirect specifier to prevent tsx/Node.js static analysis from trying
+  // to resolve cloudflare:workers during CLI module loading.
+  const specifier = 'cloudflare' + ':workers'
+  const { env } = await import(/* @vite-ignore */ specifier)
+  d1Binding = (env as any).D1
+}
 
 export default buildConfig({
   admin: {
@@ -66,5 +53,13 @@ export default buildConfig({
   typescript: {
     outputFile: path.resolve(dirname, 'payload-types.ts'),
   },
-  db: sqliteD1Adapter({ binding: d1Binding }),
+  db: sqliteD1Adapter({
+    binding: d1Binding,
+    // Disable automatic dev schema push. pushDevSchema() uses drizzle-kit/api which
+    // cannot run inside miniflare's Workers sandbox. Instead, run migrations via:
+    //   pnpm payload migrate:create  (generates SQL migration files)
+    //   wrangler d1 migrations apply payload-cms-fixture --local  (applies them)
+    // OR set PAYLOAD_FORCE_DRIZZLE_PUSH=true to re-enable push when running in Node.
+    push: false,
+  }),
 })

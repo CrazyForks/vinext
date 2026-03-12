@@ -8,6 +8,7 @@
   ],
   "main": "vinext/server/app-router-entry",
   "assets": {
+    "directory": ".wrangler/assets",
     "not_found_handling": "none",
     "binding": "ASSETS"
   },
