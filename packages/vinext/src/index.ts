@@ -3343,6 +3343,104 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
     plugins.push(rscPluginPromise);
   }
 
+  // Fix RSC hoist transform parameter/const name conflicts.
+  //
+  // The RSC plugin's transformHoistInlineDirective (via periscopic scope analysis)
+  // captures closure variables as parameters of hoisted $$hoist_N_ functions.
+  // If the hoisted function body immediately redeclares one of those captured
+  // names with `const X = ...`, the generated code produces a SyntaxError.
+  //
+  // With encryption disabled (no bindVar decode), the conflict is a direct param:
+  //   async function $$hoist_0_foo(config, cookies, lang) {
+  //     const cookies = await getCookies(); // ← SyntaxError: duplicate identifier
+  //   }
+  //
+  // With encryption enabled (default), bindVars are decoded from $$hoist_encoded:
+  //   async function $$hoist_0_foo($$hoist_encoded, lang) {
+  //     const [config, cookies] = await decryptActionBoundArgs($$hoist_encoded);
+  //     const cookies = await getCookies(); // ← SyntaxError: duplicate identifier
+  //   }
+  //
+  // Workaround: after the RSC plugin runs, detect conflicting names and rename
+  // them to `$$_${name}` in the param list or in the ArrayPattern destructure.
+  // The `.bind(null, ...)` call site is unaffected (passes values by position).
+  plugins.push({
+    name: "vinext:fix-rsc-hoist-param-conflict",
+    enforce: "post" as const,
+    transform(code: string, _id: string) {
+      // Fast path: skip if no hoist markers
+      if (!code.includes("$$hoist_") || !code.includes("use server")) return null;
+
+      let ast: ReturnType<typeof parseAst>;
+      try {
+        ast = parseAst(code);
+      } catch (e) {
+        return null;
+      }
+
+      const ms = new MagicString(code);
+      let changed = false;
+
+      for (const node of (ast as any).body) {
+        // Look for: [export] async function $$hoist_N_name(params...) { ... }
+        const decl =
+          node.type === "ExportNamedDeclaration" && node.declaration?.type === "FunctionDeclaration"
+            ? node.declaration
+            : node.type === "FunctionDeclaration"
+              ? node
+              : null;
+
+        if (!decl || !decl.id?.name?.startsWith("$$hoist_")) continue;
+
+        const params: Array<{ type: string; name: string; start: number; end: number }> =
+          decl.params ?? [];
+        const body = decl.body?.body ?? [];
+
+        // Collect top-level `const X = ...` (Identifier) declarations in the body
+        const localConsts = new Set<string>();
+        for (const stmt of body) {
+          if (stmt.type === "VariableDeclaration" && stmt.kind === "const") {
+            for (const d of (stmt as any).declarations) {
+              if (d.id?.type === "Identifier") {
+                localConsts.add(d.id.name);
+              }
+            }
+          }
+        }
+
+        if (localConsts.size === 0) continue;
+
+        // Case 1: Direct Identifier parameter conflicts with a local const
+        for (const param of params) {
+          if (param.type !== "Identifier") continue;
+          if (!localConsts.has(param.name)) continue;
+          ms.update(param.start, param.end, `$$_${param.name}`);
+          changed = true;
+        }
+
+        // Case 2: ArrayPattern destructure in body (encrypted bindVars):
+        //   const [config, cookies] = await decryptActionBoundArgs($$hoist_encoded);
+        // where `cookies` conflicts with a later `const cookies = ...`
+        for (const stmt of body) {
+          if (stmt.type === "VariableDeclaration" && stmt.kind === "const") {
+            for (const d of (stmt as any).declarations) {
+              if (d.id?.type !== "ArrayPattern") continue;
+              for (const el of d.id.elements) {
+                if (el?.type === "Identifier" && localConsts.has(el.name)) {
+                  ms.update(el.start, el.end, `$$_${el.name}`);
+                  changed = true;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (!changed) return null;
+      return { code: ms.toString(), map: ms.generateMap({ hires: "boundary" }) };
+    },
+  });
+
   return plugins;
 }
 
