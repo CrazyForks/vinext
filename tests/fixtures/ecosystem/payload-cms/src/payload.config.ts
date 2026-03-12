@@ -3,13 +3,20 @@ import { sqliteD1Adapter } from '@payloadcms/db-d1-sqlite'
 import { lexicalEditor } from '@payloadcms/richtext-lexical'
 import { buildConfig } from 'payload'
 import { fileURLToPath } from 'url'
-import { env } from 'cloudflare:workers'
 
 import { Users } from './collections/Users'
 import { Posts } from './collections/Posts'
 
 const filename = fileURLToPath(import.meta.url)
 const dirname = path.dirname(filename)
+
+// Lazily resolve the D1 binding per-request from cloudflare:workers env.
+// Using a dynamic import avoids issues with top-level await in some bundler configs,
+// and the @cloudflare/vite-plugin makes `cloudflare:workers` available at runtime.
+async function getD1Binding() {
+  const { env } = await import('cloudflare:workers')
+  return (env as any).D1
+}
 
 export default buildConfig({
   admin: {
@@ -24,5 +31,5 @@ export default buildConfig({
   typescript: {
     outputFile: path.resolve(dirname, 'payload-types.ts'),
   },
-  db: sqliteD1Adapter({ binding: (env as any).D1 }),
+  db: sqliteD1Adapter({ binding: getD1Binding() as any }),
 })
