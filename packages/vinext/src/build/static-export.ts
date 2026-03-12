@@ -56,10 +56,15 @@ async function createTempViteServer(
   const vite = await import("vite");
   const { default: vinextPlugin } = await import("../index.js");
 
+  // Pass appDir: root so the plugin resolves @vitejs/plugin-rsc from the
+  // project root (not process.cwd() which is the monorepo root when running
+  // tests). Without this, earlyAppDirExists is checked against process.cwd()
+  // and returns false, so the RSC plugin is never loaded and App Router
+  // requests get 404s from the dev server.
   const server = await vite.createServer({
     root,
     configFile: false,
-    plugins: [vinextPlugin()],
+    plugins: [vinextPlugin({ appDir: root })],
     optimizeDeps: { holdUntilCrawlEnd: true },
     server: { port: 0, cors: false },
     logLevel: "silent",
@@ -1285,6 +1290,74 @@ async function collectStaticRoutesFromSource(root: string): Promise<CollectedRou
   }
 
   return { urls, skipped, routeClassifications };
+}
+
+/**
+ * Classify all routes in the project via static source-file analysis.
+ *
+ * Covers both App Router (app/) and Pages Router (pages/). Does NOT start a
+ * dev server or execute any page modules — all classification is done by
+ * reading source files with regex-based analysis. This means:
+ *
+ *   - `export const dynamic = "force-dynamic"` → ssr
+ *   - `export const revalidate = 60` → isr
+ *   - `getServerSideProps` → ssr
+ *   - `getStaticProps` with no revalidate → static
+ *   - dynamic URL pattern with no explicit config → unknown (conservative)
+ *   - re-exported `getStaticProps` → isr (conservative)
+ *
+ * Limitation: cannot detect implicit dynamic behaviour from runtime API
+ * calls (`headers()`, `cookies()`, etc.) that are invisible to static
+ * analysis. Routes without explicit config are classified as "unknown"
+ * rather than "static".
+ *
+ * This is the same analysis used internally by `prerenderStaticPages` and
+ * `printBuildReport`. Exposing it as a public function lets callers build
+ * the route map cheaply — without pre-rendering — and then decide what to
+ * do with that information.
+ */
+export async function classifyRoutesFromSource(
+  root: string,
+): Promise<Map<string, { type: RouteType; revalidate?: number }>> {
+  const routeClassifications: Map<string, { type: RouteType; revalidate?: number }> = new Map();
+
+  // ── App Router ────────────────────────────────────────────────────────────
+  const appDirCandidates = [path.join(root, "app"), path.join(root, "src", "app")];
+  const appDir = appDirCandidates.find((d) => fs.existsSync(d));
+
+  if (appDir) {
+    const { classifyAppRoute } = await import("./report.js");
+    const routes = await appRouter(appDir);
+    for (const route of routes) {
+      routeClassifications.set(
+        route.pattern,
+        classifyAppRoute(route.pagePath, route.routePath, route.isDynamic),
+      );
+    }
+  }
+
+  // ── Pages Router ──────────────────────────────────────────────────────────
+  const pagesDirCandidates = [path.join(root, "pages"), path.join(root, "src", "pages")];
+  const pagesDir = pagesDirCandidates.find((d) => fs.existsSync(d));
+
+  if (pagesDir) {
+    const [pageRoutes, apiRoutes] = await Promise.all([
+      pagesRouter(pagesDir),
+      apiRouter(pagesDir),
+    ]);
+
+    for (const route of apiRoutes) {
+      routeClassifications.set(route.pattern, { type: "api" });
+    }
+
+    for (const route of pageRoutes) {
+      const routeName = path.basename(route.filePath, path.extname(route.filePath));
+      if (routeName.startsWith("_")) continue;
+      routeClassifications.set(route.pattern, classifyPagesRoute(route.filePath));
+    }
+  }
+
+  return routeClassifications;
 }
 
 interface CollectedRoutes {

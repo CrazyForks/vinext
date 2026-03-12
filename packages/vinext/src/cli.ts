@@ -453,7 +453,9 @@ async function buildApp() {
   }
 
   // ── Pre-render static pages (non-export builds) ────────────────
-  const { prerenderStaticPages } = await import(/* @vite-ignore */ "./build/static-export.js");
+  const { prerenderStaticPages, classifyRoutesFromSource } = await import(
+    /* @vite-ignore */ "./build/static-export.js"
+  );
 
   const prerenderResult = await prerenderStaticPages({
     root: process.cwd(),
@@ -473,9 +475,18 @@ async function buildApp() {
     console.log(`\n  Pre-rendered ${prerenderResult.pageCount} static page(s)\n`);
   }
 
+  // Use runtime-confirmed classifications from pre-rendering when available.
+  // For App Router builds (which skip pre-rendering) or when pre-rendering
+  // produced no classifications, fall back to static source analysis so the
+  // build report still shows accurate route types without any server round-trip.
+  const knownRoutes =
+    prerenderResult.routeClassifications.size > 0
+      ? prerenderResult.routeClassifications
+      : await classifyRoutesFromSource(process.cwd());
+
   await printBuildReport({
     root: process.cwd(),
-    knownRoutes: prerenderResult.routeClassifications,
+    knownRoutes,
   });
 
   console.log("\n  Build complete. Run `vinext start` to start the production server.\n");
