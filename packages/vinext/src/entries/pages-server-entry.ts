@@ -29,6 +29,9 @@ const _routeTriePath = fileURLToPath(new URL("../routing/route-trie.js", import.
   /\\/g,
   "/",
 );
+const _routeValidationPath = fileURLToPath(
+  new URL("../routing/route-validation.js", import.meta.url),
+).replace(/\\/g, "/");
 
 /**
  * Generate the virtual SSR server entry module.
@@ -271,6 +274,7 @@ import { getSSRFontStyles as _getSSRFontStylesLocal, getSSRFontPreloads as _getS
 import { parseCookies } from ${JSON.stringify(path.resolve(__dirname, "../config/config-matchers.js").replace(/\\/g, "/"))};
 import { runWithExecutionContext as _runWithExecutionContext, getRequestExecutionContext as _getRequestExecutionContext } from ${JSON.stringify(_requestContextShimPath)};
 import { buildRouteTrie as _buildRouteTrie, trieMatch as _trieMatch } from ${JSON.stringify(_routeTriePath)};
+import { patternToNextFormat } from ${JSON.stringify(_routeValidationPath)};
 ${instrumentationImportCode}
 ${middlewareImportCode}
 
@@ -395,13 +399,6 @@ function parseQuery(url) {
     }
   }
   return q;
-}
-
-function patternToNextFormat(pattern) {
-  return pattern
-    .replace(/:([\\w]+)\\*/g, "[[...$1]]")
-    .replace(/:([\\w]+)\\+/g, "[...$1]")
-    .replace(/:([\\w]+)/g, "[$1]");
 }
 
 function collectAssetTags(manifest, moduleIds) {
