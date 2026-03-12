@@ -17932,6 +17932,7 @@ import { getSSRFontStyles as _getSSRFontStylesLocal, getSSRFontPreloads as _getS
 import { parseCookies } from "<ROOT>/packages/vinext/src/config/config-matchers.js";
 import { runWithExecutionContext as _runWithExecutionContext, getRequestExecutionContext as _getRequestExecutionContext } from "<ROOT>/packages/vinext/src/shims/request-context.js";
 import { buildRouteTrie as _buildRouteTrie, trieMatch as _trieMatch } from "<ROOT>/packages/vinext/src/routing/route-trie.js";
+import { patternToNextFormat } from "<ROOT>/packages/vinext/src/routing/route-validation.js";
 import { reportRequestError as _reportRequestError } from "vinext/instrumentation";
 import { resolvePagesI18nRequest } from "<ROOT>/packages/vinext/src/server/pages-i18n.js";
 import * as _instrumentation from "<ROOT>/tests/fixtures/pages-basic/instrumentation.ts";
@@ -18149,13 +18150,6 @@ function parseQuery(url) {
     }
   }
   return q;
-}
-
-function patternToNextFormat(pattern) {
-  return pattern
-    .replace(/:([\\w]+)\\*/g, "[[...$1]]")
-    .replace(/:([\\w]+)\\+/g, "[...$1]")
-    .replace(/:([\\w]+)/g, "[$1]");
 }
 
 function collectAssetTags(manifest, moduleIds) {
