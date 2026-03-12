@@ -385,7 +385,7 @@ async function buildApp() {
             outDir: "dist/client",
             manifest: true,
             ssrManifest: true,
-            rollupOptions: {
+            rolldownOptions: {
               input: "virtual:vinext-client-entry",
               output: clientOutputConfig,
               treeshake: clientTreeshakeConfig,
@@ -403,7 +403,7 @@ async function buildApp() {
           build: {
             outDir: "dist/server",
             ssr: "virtual:vinext-server-entry",
-            rollupOptions: {
+            rolldownOptions: {
               output: {
                 entryFileNames: "entry.js",
               },

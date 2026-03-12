@@ -55,7 +55,6 @@ import { hasBasePath } from "./utils/base-path.js";
 import { asyncHooksStubPlugin } from "./plugins/async-hooks-stub.js";
 import { clientReferenceDedupPlugin } from "./plugins/client-reference-dedup.js";
 import { hasWranglerConfig, formatMissingCloudflarePluginError } from "./deploy.js";
-import tsconfigPaths from "vite-tsconfig-paths";
 import react, { Options as VitePluginReactOptions } from "@vitejs/plugin-react";
 import MagicString from "magic-string";
 import path from "node:path";
@@ -234,21 +233,6 @@ function extractStaticValue(node: any): unknown {
   }
 }
 
-/**
- * Detect Vite major version at runtime by resolving from cwd.
- * The plugin may be installed in a workspace root with Vite 7 but used
- * by a project that has Vite 8 — so we resolve from cwd, not from
- * the plugin's own location.
- */
-function getViteMajorVersion(): number {
-  try {
-    const require = createRequire(path.join(process.cwd(), "package.json"));
-    const vitePkg = require("vite/package.json");
-    return parseInt(vitePkg.version, 10);
-  } catch {
-    return 7; // default to Vite 7
-  }
-}
 
 type UserResolveConfigWithTsconfigPaths = NonNullable<UserConfig["resolve"]> & {
   tsconfigPaths?: boolean;
@@ -708,7 +692,6 @@ export interface VinextOptions {
 }
 
 export default function vinext(options: VinextOptions = {}): PluginOption[] {
-  const viteMajorVersion = getViteMajorVersion();
   let root: string;
   let pagesDir: string;
   let appDir: string;
@@ -830,7 +813,6 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
     // Resolve tsconfig paths/baseUrl aliases so real-world Next.js repos
     // that use @/*, #/*, or baseUrl imports work out of the box.
     // Vite 8+ supports this natively via resolve.tsconfigPaths.
-    ...(viteMajorVersion >= 8 ? [] : [tsconfigPaths()]),
     // React Fast Refresh + JSX transform for client components.
     reactPlugin,
     // Transform CJS require()/module.exports to ESM before other plugins
@@ -843,8 +825,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
       async config(config, env) {
         root = config.root ?? process.cwd();
         const userResolve = config.resolve as UserResolveConfigWithTsconfigPaths | undefined;
-        const shouldEnableNativeTsconfigPaths =
-          viteMajorVersion >= 8 && userResolve?.tsconfigPaths === undefined;
+        const shouldEnableNativeTsconfigPaths = userResolve?.tsconfigPaths === undefined;
 
         // Load .env files into process.env before anything else.
         // Next.js loads .env files before evaluating next.config.js, so
@@ -1166,7 +1147,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           // Disable Vite's default HTML serving - we handle all routing
           appType: "custom",
           build: {
-            rollupOptions: {
+            rolldownOptions: {
               // Suppress "Module level directives cause errors when bundled"
               // warnings for "use client" / "use server" directives. Our shims
               // and third-party libraries legitimately use these directives;
@@ -1174,7 +1155,8 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               // final bundle. We preserve any user-supplied onwarn so custom
               // warning handling is not lost.
               onwarn: (() => {
-                const userOnwarn = config.build?.rollupOptions?.onwarn;
+                const userOnwarn =
+                  config.build?.rolldownOptions?.onwarn ?? config.build?.rollupOptions?.onwarn;
                 return (warning, defaultHandler) => {
                   if (
                     warning.code === "MODULE_LEVEL_DIRECTIVE" &&
@@ -1260,11 +1242,8 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           optimizeDeps: {
             exclude: ["vinext", "@vercel/og"],
           },
-          // Enable JSX in .tsx/.jsx files
-          // Vite 7 uses `esbuild` for transforms, Vite 8+ uses `oxc`
-          ...(viteMajorVersion >= 8
-            ? { oxc: { jsx: { runtime: "automatic" } } }
-            : { esbuild: { jsx: "automatic" } }),
+          // Enable JSX in .tsx/.jsx files (Vite 8 uses oxc for transforms)
+          oxc: { jsx: { runtime: "automatic" } },
           // Define env vars for client bundle
           define: defines,
           // Set base path if configured
@@ -1327,7 +1306,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               },
               build: {
                 outDir: "dist/server",
-                rollupOptions: {
+                rolldownOptions: {
                   input: { index: VIRTUAL_RSC_ENTRY },
                 },
               },
@@ -1352,7 +1331,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               },
               build: {
                 outDir: "dist/server/ssr",
-                rollupOptions: {
+                rolldownOptions: {
                   input: { index: VIRTUAL_APP_SSR_ENTRY },
                 },
               },
@@ -1390,7 +1369,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                 // on every page — defeating code-splitting for React.lazy() and
                 // next/dynamic boundaries.
                 ...(hasCloudflarePlugin ? { manifest: true } : {}),
-                rollupOptions: {
+                rolldownOptions: {
                   input: { index: VIRTUAL_APP_BROWSER_ENTRY },
                   output: clientOutputConfig,
                   treeshake: clientTreeshakeConfig,
@@ -1409,7 +1388,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               build: {
                 manifest: true,
                 ssrManifest: true,
-                rollupOptions: {
+                rolldownOptions: {
                   input: { index: VIRTUAL_CLIENT_ENTRY },
                   output: clientOutputConfig,
                   treeshake: clientTreeshakeConfig,

@@ -15,6 +15,6 @@
   },
   "devDependencies": {
     "@vitejs/plugin-rsc": "0.5.19",
-    "vite": "7.3.1"
+    "vite": "^8.0.0"
   }
 }
