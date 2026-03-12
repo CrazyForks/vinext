@@ -1183,8 +1183,15 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
         : null;
       if (pagesPrerenderedFile) {
         const html = await fs.promises.readFile(pagesPrerenderedFile, "utf-8");
+        // Strip any Location header that middleware may have set. A Location
+        // header is only meaningful alongside a 3xx redirect status; spreading
+        // it onto a 200 pre-rendered response would be semantically wrong and
+        // could cause browsers or CDNs to follow a redirect they should not.
+        const safeMiddlewareHeaders = Object.fromEntries(
+          Object.entries(middlewareHeaders).filter(([k]) => k.toLowerCase() !== "location"),
+        );
         const prerenderedHeaders: Record<string, string | string[]> = {
-          ...middlewareHeaders,
+          ...safeMiddlewareHeaders,
           // Conservative cache TTL for pre-rendered pages. A year-long cache
           // (s-maxage=31536000) would be ideal for truly static pages, but
           // collectStaticRoutesFromSource has known false-negative cases for

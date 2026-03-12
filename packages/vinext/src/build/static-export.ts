@@ -171,7 +171,15 @@ export async function staticExportPages(options: StaticExportOptions): Promise<S
     const routeName = path.basename(route.filePath, path.extname(route.filePath));
     if (routeName.startsWith("_")) continue;
 
-    const pageModule = await server.ssrLoadModule(route.filePath);
+    let pageModule: Record<string, unknown>;
+    try {
+      pageModule = await server.ssrLoadModule(route.filePath);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      result.routeClassifications.set(route.pattern, { type: "unknown" });
+      result.warnings.push(`Failed to load ${route.pattern}: ${msg} — skipping`);
+      continue;
+    }
 
     // Validate: getServerSideProps is not allowed with static export
     if (typeof pageModule.getServerSideProps === "function") {
@@ -186,7 +194,9 @@ export async function staticExportPages(options: StaticExportOptions): Promise<S
     if (route.isDynamic) {
       // Dynamic route — needs getStaticPaths to enumerate params
       if (typeof pageModule.getStaticPaths !== "function") {
-        result.routeClassifications.set(route.pattern, { type: "ssr" });
+        // Classify as "unknown", not "ssr": the route is skipped because its
+        // params can't be enumerated statically, not because it uses SSR APIs.
+        result.routeClassifications.set(route.pattern, { type: "unknown" });
         result.warnings.push(
           `Dynamic route ${route.pattern} has no getStaticPaths() — skipping (no pages generated)`,
         );
@@ -597,6 +607,12 @@ export function getOutputPath(urlPath: string, trailingSlash: boolean, outDir: s
     return "index.html";
   }
 
+  // Reject backslashes before posix-normalizing. path.posix.normalize treats
+  // '\' as a literal character (not a separator), so a Windows-style path like
+  // "..\secret" would pass through unchanged and bypass the traversal guard.
+  if (urlPath.includes("\\")) {
+    throw new Error(`Output path "${urlPath}" escapes the output directory`);
+  }
   const normalized = path.posix.normalize(urlPath);
   const clean = normalized.replace(/^\//, "");
 
@@ -746,7 +762,6 @@ async function expandDynamicAppRoute(
     throw new Error(`generateStaticParams() failed for ${route.pattern}: ${(e as Error).message}`);
   }
 
-  if (!Array.isArray(paramSets)) return [];
   return paramSets.map((params) => buildUrlFromParams(route.pattern, params));
 }
 
@@ -808,7 +823,9 @@ export async function staticExportApp(
         const pageModule = await server.ssrLoadModule(route.pagePath);
 
         if (typeof pageModule.generateStaticParams !== "function") {
-          result.routeClassifications.set(route.pattern, { type: "ssr" });
+          // Classify as "unknown", not "ssr": the route is skipped because its
+          // params can't be enumerated statically, not because it uses SSR APIs.
+          result.routeClassifications.set(route.pattern, { type: "unknown" });
           result.warnings.push(
             `Dynamic route ${route.pattern} has no generateStaticParams() — skipping (no pages generated)`,
           );
@@ -823,7 +840,7 @@ export async function staticExportApp(
         );
 
         if (expandedUrls.length === 0) {
-          result.routeClassifications.set(route.pattern, { type: "ssr" });
+          result.routeClassifications.set(route.pattern, { type: "unknown" });
           result.warnings.push(
             `generateStaticParams() for ${route.pattern} returned empty array — no pages generated`,
           );
@@ -933,7 +950,13 @@ export interface RunStaticExportOptions {
   root: string;
   outDir?: string;
   config?: ResolvedNextConfig;
-  configOverride?: Partial<NextConfig>;
+  /**
+   * Scalar config overrides applied on top of the resolved config.
+   * Only safe scalar fields are permitted — non-scalar fields like
+   * `pageExtensions` or `redirects` require re-running resolveNextConfig
+   * and cannot be shallow-merged correctly.
+   */
+  configOverride?: Pick<NextConfig, "output" | "trailingSlash">;
 }
 
 /**
@@ -1151,8 +1174,10 @@ export async function prerenderStaticPages(options: PrerenderOptions): Promise<P
 
   // App Router prod server delegates entirely to the RSC handler which manages
   // its own middleware, auth, and streaming pipeline. Pre-rendered HTML files
-  // would never be served, so skip pre-rendering for App Router builds.
-  if (isAppRouter) {
+  // would never be served, so skip pre-rendering for pure App Router builds.
+  // Hybrid projects (app/ + pages/) still have a Pages Router entry that CAN
+  // serve pre-rendered pages, so only bail out when Pages Router is absent.
+  if (isAppRouter && !isPagesRouter) {
     return result;
   }
 
@@ -1204,7 +1229,10 @@ export async function prerenderStaticPages(options: PrerenderOptions): Promise<P
 
         if (!res.ok) {
           result.skipped.push(urlPath);
-          await res.text(); // consume body
+          // Cancel the body without awaiting — avoids throwing an AbortError
+          // (which would fall into the outer catch and double-count this URL in
+          // result.skipped) if the AbortController already fired.
+          res.body?.cancel();
           continue;
         }
 
@@ -1273,7 +1301,9 @@ async function collectStaticRoutesFromSource(root: string): Promise<CollectedRou
 
     if (route.isDynamic) {
       skipped.push(`${route.pattern} (dynamic)`);
-      routeClassifications.set(route.pattern, { type: "ssr" });
+      // Classify as "unknown", not "ssr": skipped due to unenumerable params,
+      // not because the route uses SSR APIs.
+      routeClassifications.set(route.pattern, { type: "unknown" });
       continue;
     }
 

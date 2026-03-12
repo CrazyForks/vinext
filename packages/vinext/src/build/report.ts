@@ -289,7 +289,12 @@ export function buildReportRows(options: {
   }
 
   for (const route of options.apiRoutes ?? []) {
-    rows.push({ pattern: route.pattern, type: "api" });
+    const override = known?.get(route.pattern);
+    rows.push({
+      pattern: route.pattern,
+      type: override?.type ?? "api",
+      revalidate: override?.revalidate,
+    });
   }
 
   for (const route of options.appRoutes ?? []) {
