@@ -215,8 +215,10 @@ export async function handleApiRoute(
       return true;
     }
 
-    // Parse query from URL + route params
-    const query: Record<string, string | string[]> = { ...params };
+    // Parse query from URL + route params (filter out undefined optional catch-all params)
+    const query: Record<string, string | string[]> = Object.fromEntries(
+      Object.entries(params).filter((e): e is [string, string | string[]] => e[1] !== undefined),
+    );
     const queryString = url.split("?")[1];
     if (queryString) {
       const searchParams = new URLSearchParams(queryString);

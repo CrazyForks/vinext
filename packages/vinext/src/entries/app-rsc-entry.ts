@@ -696,7 +696,14 @@ async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, req
   const headElements = [charsetMeta, noindexMeta];
   if (resolvedMetadata) headElements.push(createElement(MetadataHead, { metadata: resolvedMetadata }));
   headElements.push(createElement(ViewportHead, { viewport: resolvedViewport }));
-  let element = createElement(Fragment, null, ...headElements, createElement(BoundaryComponent));
+  // Pass params and searchParams to BoundaryComponent as thenables (Next.js 15+ async pattern).
+  // Framework-specific not-found components (e.g. PayloadCMS's NotFoundPage) expect at least
+  // { params, searchParams } props — calling createElement(BoundaryComponent) with no props
+  // causes them to throw when they try to destructure those values.
+  const _bcParams = makeThenableParams(_fallbackParams);
+  const _bcSearchParamsRaw = request ? Object.fromEntries(new URL(request.url).searchParams) : {};
+  const _bcSearchParams = makeThenableParams(_bcSearchParamsRaw);
+  let element = createElement(Fragment, null, ...headElements, createElement(BoundaryComponent, { params: _bcParams, searchParams: _bcSearchParams }));
   if (isRscRequest) {
     // For RSC requests (client-side navigation), wrap the element with the same
     // component wrappers that buildPageElement() uses. Without these wrappers,

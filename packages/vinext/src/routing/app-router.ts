@@ -1038,7 +1038,7 @@ function joinRoutePattern(basePattern: string, subPath: string): string {
 export function matchAppRoute(
   url: string,
   routes: AppRoute[],
-): { route: AppRoute; params: Record<string, string | string[]> } | null {
+): { route: AppRoute; params: Record<string, string | string[] | undefined> } | null {
   const pathname = url.split("?")[0];
   let normalizedUrl = pathname === "/" ? "/" : pathname.replace(/\/$/, "");
   normalizedUrl = normalizePathnameForRouteMatch(normalizedUrl);

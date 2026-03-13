@@ -61,6 +61,7 @@ import MagicString from "magic-string";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import commonjs from "vite-plugin-commonjs";
 
@@ -1585,6 +1586,38 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         const hook = mdxDelegate.transform;
         const fn = typeof hook === "function" ? hook : hook.handler;
         return fn.call(this, code, id, options);
+      },
+    },
+    // Auto-generate PayloadCMS import map when `payload` is installed.
+    //
+    // PayloadCMS generates a file at `src/app/(payload)/admin/importMap.js`
+    // (or `app/(payload)/admin/importMap.js`) that maps component paths to their
+    // React imports. This file is required by the admin UI layouts and pages, but
+    // is not committed to version control (it's gitignored and regenerated on each
+    // dev/build start).
+    //
+    // In a standard Next.js + PayloadCMS project the `withPayload()` Next.js
+    // config wrapper triggers generation via a webpack/turbopack plugin. Since
+    // vinext does not use `withPayload`, vinext detects `payload` in the project
+    // and runs `payload generate:importmap` automatically in `buildStart`.
+    {
+      name: "vinext:payload-importmap",
+
+      buildStart() {
+        const payloadBin = path.join(root, "node_modules", ".bin", "payload");
+        if (!fs.existsSync(payloadBin)) return;
+        try {
+          execFileSync(payloadBin, ["generate:importmap"], {
+            cwd: root,
+            stdio: "inherit",
+            env: { ...process.env },
+          });
+        } catch (err) {
+          // Non-fatal: warn but don't block startup. The admin UI may not render
+          // correctly until the import map is regenerated, but it won't crash the
+          // Vite dev server.
+          console.warn("[vinext] payload generate:importmap failed:", err);
+        }
       },
     },
     // Shim React canary/experimental APIs (ViewTransition, addTransitionType)

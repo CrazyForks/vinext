@@ -175,7 +175,7 @@ function getOrBuildTrie(routes: Route[]): TrieNode<Route> {
 export function matchRoute(
   url: string,
   routes: Route[],
-): { route: Route; params: Record<string, string | string[]> } | null {
+): { route: Route; params: Record<string, string | string[] | undefined> } | null {
   // Normalize: strip query string and trailing slash
   const pathname = url.split("?")[0];
   let normalizedUrl = pathname === "/" ? "/" : pathname.replace(/\/$/, "");

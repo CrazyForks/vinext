@@ -129,7 +129,7 @@ export function buildRouteTrie<R extends { patternParts: string[] }>(routes: R[]
 export function trieMatch<R>(
   root: TrieNode<R>,
   urlParts: string[],
-): { route: R; params: Record<string, string | string[]> } | null {
+): { route: R; params: Record<string, string | string[] | undefined> } | null {
   return match(root, urlParts, 0);
 }
 
@@ -137,7 +137,7 @@ function match<R>(
   node: TrieNode<R>,
   urlParts: string[],
   index: number,
-): { route: R; params: Record<string, string | string[]> } | null {
+): { route: R; params: Record<string, string | string[] | undefined> } | null {
   // All URL segments consumed
   if (index === urlParts.length) {
     // Exact match at this node
@@ -146,9 +146,13 @@ function match<R>(
     }
 
     // Optional catch-all with 0 segments
+    // Next.js sets the param to `undefined` (not `[]`) when the optional catch-all
+    // matches zero segments (i.e., visiting the base path of a [[...param]] route).
+    // This matches Next.js behavior: params.segments === undefined for /admin when
+    // the route is [[...segments]].
     if (node.optionalCatchAllChild !== null) {
-      const params: Record<string, string | string[]> = Object.create(null);
-      params[node.optionalCatchAllChild.paramName] = [];
+      const params: Record<string, string | string[] | undefined> = Object.create(null);
+      params[node.optionalCatchAllChild.paramName] = undefined;
       return { route: node.optionalCatchAllChild.route, params };
     }
 
