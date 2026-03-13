@@ -1152,11 +1152,23 @@ async function buildPageElement(route, params, opts, searchParams) {
   // ErrorBoundary re-throws notFound errors.
   // Pre-render the not-found component as a React element since it may be a
   // server component (not a client reference) and can't be passed as a function prop.
+  // Per the Next.js spec, not-found.tsx components receive no props. If a third-party
+  // component violates this (e.g. PayloadCMS NotFoundPage requires config props), the
+  // async wrapper below catches the error and returns null so the main page renders.
   {
     const NotFoundComponent = route.notFound?.default ?? ${rootNotFoundVar ? `${rootNotFoundVar}?.default` : "null"};
     if (NotFoundComponent) {
+      const _notFoundWrapper = async function _notFoundFallback() {
+        try {
+          const _r = NotFoundComponent({});
+          if (_r && typeof _r === "object" && typeof _r.then === "function") return await _r;
+          return _r;
+        } catch {
+          return null;
+        }
+      };
       element = createElement(NotFoundBoundary, {
-        fallback: createElement(NotFoundComponent),
+        fallback: createElement(_notFoundWrapper),
         children: element,
       });
     }
@@ -1201,8 +1213,17 @@ async function buildPageElement(route, params, opts, searchParams) {
       {
         const LayoutNotFound = route.notFounds?.[i]?.default;
         if (LayoutNotFound) {
+          const _layoutNotFoundWrapper = async function _layoutNotFoundFallback() {
+            try {
+              const _r = LayoutNotFound({});
+              if (_r && typeof _r === "object" && typeof _r.then === "function") return await _r;
+              return _r;
+            } catch {
+              return null;
+            }
+          };
           element = createElement(NotFoundBoundary, {
-            fallback: createElement(LayoutNotFound),
+            fallback: createElement(_layoutNotFoundWrapper),
             children: element,
           });
         }
