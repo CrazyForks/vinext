@@ -1,0 +1,9 @@
+# Vite build artifacts
+dist/
+.vite/
+
+# Cloudflare wrangler state (local D1, KV, etc.)
+.wrangler/state/
+
+# PayloadCMS generated files — regenerated automatically on dev server start
+src/app/(payload)/admin/importMap.js

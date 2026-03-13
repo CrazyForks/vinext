@@ -2028,7 +2028,36 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     if (typeof handlerFn === "function") {
       const previousHeadersPhase = setHeadersAccessPhase("route-handler");
       try {
-        const response = await handlerFn(request, { params });
+        // Prepare the request for the route handler.
+        //
+        // Some frameworks (e.g. PayloadCMS) mutate the incoming Request via
+        // Object.assign() and later inspect request.body to decide whether to
+        // call request.text(). In workerd the body getter can return null after
+        // such mutation even though the body was originally present. To work
+        // around this, we pre-read JSON bodies for mutating methods and attach
+        // the parsed value as request.data before passing to the handler.
+        // PayloadCMS's addDataAndFileToRequest only sets req.data when body is
+        // truthy; if body is null our pre-attached value is preserved because
+        // createPayloadRequest's Object.assign does not include a "data" key.
+        let routeRequest = request;
+        try {
+          const bodyMethod = method === "POST" || method === "PUT" || method === "PATCH";
+          const ct = request.headers.get("content-type") || "";
+          if (bodyMethod && ct.includes("application/json")) {
+            const bodyText = await request.text();
+            routeRequest = new Request(request.url, {
+              method: request.method,
+              headers: request.headers,
+              body: bodyText,
+            });
+            try { routeRequest.data = JSON.parse(bodyText); } catch {}
+          } else {
+            routeRequest = request.clone();
+          }
+        } catch {
+          // body already consumed or clone failed — use original
+        }
+        const response = await handlerFn(routeRequest, { params });
         const dynamicUsedInHandler = consumeDynamicUsage();
 
         // Apply Cache-Control from route segment config (export const revalidate = N).
