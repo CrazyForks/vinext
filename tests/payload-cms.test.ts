@@ -269,28 +269,40 @@ describe("payload-cms", () => {
   // ── Admin UI ──────────────────────────────────────────────────────────────
 
   it("GET /admin redirects to /admin/login when unauthenticated", async () => {
-    // Follow redirects manually to check the final destination
+    // Without following redirects: /admin should return 307 to /admin/login
     const res = await fetch(`${BASE_URL}/admin`, {
-      redirect: "follow",
+      redirect: "manual",
       signal: AbortSignal.timeout(TIMEOUT),
     });
-    expect(res.status).toBe(200);
-    const html = await res.text();
-    // Admin UI renders a login or dashboard page
-    expect(html.toLowerCase()).toMatch(/payload|login|admin/);
+    expect(res.status).toBe(307);
+    const location = res.headers.get("location");
+    expect(location).toBeTruthy();
+    expect(location).toContain("/admin/login");
   });
 
-  it("GET /admin/login renders the PayloadCMS login form", async () => {
+  it("GET /admin/login returns 200 with PayloadCMS RSC UI", async () => {
+    // Fetch the RSC stream directly — the admin UI is fully client-rendered via RSC.
+    // The initial HTML is a minimal shell; content arrives via the RSC hydration stream.
+    // We verify the RSC stream is valid: correct status, PayloadCMS components referenced,
+    // and no fatal server-side TypeErrors in the rendered output.
     const res = await fetch(`${BASE_URL}/admin/login`, {
       redirect: "follow",
+      headers: { Accept: "text/x-component" },
       signal: AbortSignal.timeout(TIMEOUT),
     });
     expect(res.status).toBe(200);
-    const html = await res.text();
-    // PayloadCMS login page contains form inputs
-    expect(html).toContain("input");
-    // No 500 error content
-    expect(html).not.toContain("Internal Server Error");
-    expect(html).not.toContain("Something went wrong");
+    const rsc = await res.text();
+
+    // PayloadCMS UI components should be referenced (RootProvider from @payloadcms/ui)
+    expect(rsc).toContain("@payloadcms/ui");
+
+    // The RSC stream should contain the admin client config with login route
+    // createUnauthenticatedClientConfig returns { admin: { routes: {...} }, ... }
+    expect(rsc).toContain("/login");
+
+    // No fatal TypeError from PayloadCMS components in the RSC stream
+    // (e.g. "Cannot destructure property 'routes' of '{}'" would indicate broken config)
+    expect(rsc).not.toContain("Cannot destructure property");
+    expect(rsc).not.toContain("Internal Server Error");
   });
 });
