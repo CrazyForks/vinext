@@ -1,5 +1,4 @@
 import { createRequire } from "node:module";
-import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
@@ -64,29 +63,6 @@ const drizzleKitExternalPlugin = {
   },
 };
 
-// Run `payload generate:importmap` once on dev server start and on each build.
-// This keeps src/app/(payload)/admin/importMap.js up-to-date automatically so it
-// does not need to be checked into git.
-let importMapGenerated = false;
-const generateImportMapPlugin = {
-  name: "generate-payload-importmap",
-  async buildStart() {
-    if (importMapGenerated) return;
-    importMapGenerated = true;
-    try {
-      // Use the local .bin/payload script (added by pnpm when payload is installed).
-      const payloadBin = resolve(__dirname, "node_modules/.bin/payload");
-      execFileSync(payloadBin, ["generate:importmap"], {
-        cwd: __dirname,
-        stdio: "inherit",
-        env: { ...process.env, PAYLOAD_CONFIG_PATH: resolve(__dirname, "src/payload.config.ts") },
-      });
-    } catch (err) {
-      console.warn("[generate-payload-importmap] Warning:", err);
-    }
-  },
-};
-
 export default defineConfig({
   plugins: [
     vinext(),
@@ -94,7 +70,6 @@ export default defineConfig({
       viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
     }),
     stubDrizzleKitPlugin,
-    generateImportMapPlugin,
   ],
   resolve: {
     conditions: ["node", "import", "module", "browser", "default"],

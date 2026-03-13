@@ -826,7 +826,7 @@ describe("matchAppRoute - URL matching", () => {
     const result = matchAppRoute("/optional", routes);
     expect(result).not.toBeNull();
     expect(result!.route.pattern).toBe("/optional/:path*");
-    expect(result!.params.path).toEqual([]);
+    expect(result!.params.path).toBeUndefined();
   });
 
   it("matches optional catch-all with multiple segments", async () => {
@@ -1199,7 +1199,7 @@ describe("matchAppRoute - URL matching", () => {
     const result = matchAppRoute("/sign-in", routes);
     expect(result).not.toBeNull();
     expect(result!.route.pattern).toBe("/sign-in/:sign-in*");
-    expect(result!.params["sign-in"]).toEqual([]);
+    expect(result!.params["sign-in"]).toBeUndefined();
   });
 
   it("matches hyphenated optional catch-all with segments", async () => {
@@ -1258,7 +1258,7 @@ describe("pagesRouter - hyphenated param names", () => {
     const result = matchRoute("/sign-up", routes);
     expect(result).not.toBeNull();
     expect(result!.route.pattern).toBe("/sign-up/:sign-up*");
-    expect(result!.params["sign-up"]).toEqual([]);
+    expect(result!.params["sign-up"]).toBeUndefined();
   });
 
   it("matches hyphenated optional catch-all with segments", async () => {

@@ -305,4 +305,50 @@ describe("payload-cms", () => {
     expect(rsc).not.toContain("Cannot destructure property");
     expect(rsc).not.toContain("Internal Server Error");
   });
+
+  it("GET /admin returns 200 with PayloadCMS dashboard when authenticated (cookie-based)", async () => {
+    // PayloadCMS admin UI uses cookie-based auth for the browser session.
+    // We simulate a browser login: POST to /api/users/login, capture the Set-Cookie header,
+    // then GET /admin with that cookie. The admin dashboard RSC should render without errors.
+    expect(adminToken).toBeTruthy();
+
+    // Login to get session cookie
+    const loginRes = await fetch(`${BASE_URL}/api/users/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "admin@example.com", password: "Admin1234!" }),
+      redirect: "follow",
+      signal: AbortSignal.timeout(TIMEOUT),
+    });
+    expect(loginRes.status).toBe(200);
+
+    // Collect all Set-Cookie headers from the login response
+    const setCookieHeaders = loginRes.headers.getSetCookie?.() ?? [];
+    // getSetCookie may not exist in all environments; fall back to get
+    const cookieHeader = setCookieHeaders.length > 0
+      ? setCookieHeaders.map(c => c.split(";")[0]).join("; ")
+      : (loginRes.headers.get("set-cookie") ?? "").split(",").map(c => c.split(";")[0].trim()).join("; ");
+
+    // Fetch the authenticated admin dashboard RSC stream
+    const adminRes = await fetch(`${BASE_URL}/admin`, {
+      redirect: "follow",
+      headers: {
+        Accept: "text/x-component",
+        Cookie: cookieHeader,
+      },
+      signal: AbortSignal.timeout(TIMEOUT),
+    });
+
+    expect(adminRes.status).toBe(200);
+    const rsc = await adminRes.text();
+
+    // PayloadCMS UI components should be referenced
+    expect(rsc).toContain("@payloadcms/ui");
+
+    // No fatal serialization errors from RegExp/function props
+    expect(rsc).not.toContain("Classes or null prototypes are not supported");
+    expect(rsc).not.toContain("Event handlers cannot be passed");
+    expect(rsc).not.toContain("Cannot destructure property");
+    expect(rsc).not.toContain("Internal Server Error");
+  });
 });
