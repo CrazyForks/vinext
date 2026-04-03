@@ -611,6 +611,21 @@ function matchRoute(url) {
   return _trieMatch(_routeTrie, urlParts);
 }
 
+function __createStaticFileSignal(pathname, _mwCtx) {
+  const headers = new Headers({
+    "x-vinext-static-file": encodeURIComponent(pathname),
+  });
+  if (_mwCtx.headers) {
+    for (const [key, value] of _mwCtx.headers) {
+      headers.append(key, value);
+    }
+  }
+  return new Response(null, {
+    status: _mwCtx.status ?? 200,
+    headers,
+  });
+}
+
 // matchPattern is kept for findIntercept (linear scan over small interceptLookup array).
 function matchPattern(urlParts, patternParts) {
   const params = Object.create(null);
@@ -968,6 +983,7 @@ const __i18nConfig = null;
 const __configRedirects = [];
 const __configRewrites = {"beforeFiles":[],"afterFiles":[],"fallback":[]};
 const __configHeaders = [];
+const __publicFiles = new Set([]);
 const __allowedOrigins = [];
 
 
@@ -1504,6 +1520,18 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         return new Response("Not Found", { status: 404 });
       }
     }
+  }
+
+  // Serve public/ files as filesystem routes after middleware and before
+  // afterFiles/fallback rewrites, matching Next.js routing semantics.
+  if (
+    (request.method === "GET" || request.method === "HEAD") &&
+    !pathname.endsWith(".rsc") &&
+    __publicFiles.has(cleanPathname)
+  ) {
+    setHeadersContext(null);
+    setNavigationContext(null);
+    return __createStaticFileSignal(cleanPathname, _mwCtx);
   }
 
   // Set navigation context for Server Components.
@@ -2828,6 +2856,21 @@ function matchRoute(url) {
   return _trieMatch(_routeTrie, urlParts);
 }
 
+function __createStaticFileSignal(pathname, _mwCtx) {
+  const headers = new Headers({
+    "x-vinext-static-file": encodeURIComponent(pathname),
+  });
+  if (_mwCtx.headers) {
+    for (const [key, value] of _mwCtx.headers) {
+      headers.append(key, value);
+    }
+  }
+  return new Response(null, {
+    status: _mwCtx.status ?? 200,
+    headers,
+  });
+}
+
 // matchPattern is kept for findIntercept (linear scan over small interceptLookup array).
 function matchPattern(urlParts, patternParts) {
   const params = Object.create(null);
@@ -3185,6 +3228,7 @@ const __i18nConfig = null;
 const __configRedirects = [{"source":"/old","destination":"/new","permanent":true}];
 const __configRewrites = {"beforeFiles":[{"source":"/api/:path*","destination":"/backend/:path*"}],"afterFiles":[],"fallback":[]};
 const __configHeaders = [{"source":"/api/:path*","headers":[{"key":"X-Custom","value":"test"}]}];
+const __publicFiles = new Set([]);
 const __allowedOrigins = ["https://example.com"];
 
 
@@ -3551,6 +3595,9 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   let pathname = __normalizePath(decodedUrlPathname);
 
   
+  if (!hasBasePath(pathname, __basePath) && !pathname.startsWith("/__vinext/")) {
+    return new Response("Not Found", { status: 404 });
+  }
   // Strip basePath prefix
   pathname = stripBasePath(pathname, __basePath);
   
@@ -3724,6 +3771,18 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         return new Response("Not Found", { status: 404 });
       }
     }
+  }
+
+  // Serve public/ files as filesystem routes after middleware and before
+  // afterFiles/fallback rewrites, matching Next.js routing semantics.
+  if (
+    (request.method === "GET" || request.method === "HEAD") &&
+    !pathname.endsWith(".rsc") &&
+    __publicFiles.has(cleanPathname)
+  ) {
+    setHeadersContext(null);
+    setNavigationContext(null);
+    return __createStaticFileSignal(cleanPathname, _mwCtx);
   }
 
   // Set navigation context for Server Components.
@@ -5049,6 +5108,21 @@ function matchRoute(url) {
   return _trieMatch(_routeTrie, urlParts);
 }
 
+function __createStaticFileSignal(pathname, _mwCtx) {
+  const headers = new Headers({
+    "x-vinext-static-file": encodeURIComponent(pathname),
+  });
+  if (_mwCtx.headers) {
+    for (const [key, value] of _mwCtx.headers) {
+      headers.append(key, value);
+    }
+  }
+  return new Response(null, {
+    status: _mwCtx.status ?? 200,
+    headers,
+  });
+}
+
 // matchPattern is kept for findIntercept (linear scan over small interceptLookup array).
 function matchPattern(urlParts, patternParts) {
   const params = Object.create(null);
@@ -5414,6 +5488,7 @@ const __i18nConfig = null;
 const __configRedirects = [];
 const __configRewrites = {"beforeFiles":[],"afterFiles":[],"fallback":[]};
 const __configHeaders = [];
+const __publicFiles = new Set([]);
 const __allowedOrigins = [];
 
 
@@ -5950,6 +6025,18 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         return new Response("Not Found", { status: 404 });
       }
     }
+  }
+
+  // Serve public/ files as filesystem routes after middleware and before
+  // afterFiles/fallback rewrites, matching Next.js routing semantics.
+  if (
+    (request.method === "GET" || request.method === "HEAD") &&
+    !pathname.endsWith(".rsc") &&
+    __publicFiles.has(cleanPathname)
+  ) {
+    setHeadersContext(null);
+    setNavigationContext(null);
+    return __createStaticFileSignal(cleanPathname, _mwCtx);
   }
 
   // Set navigation context for Server Components.
@@ -7304,6 +7391,21 @@ function matchRoute(url) {
   return _trieMatch(_routeTrie, urlParts);
 }
 
+function __createStaticFileSignal(pathname, _mwCtx) {
+  const headers = new Headers({
+    "x-vinext-static-file": encodeURIComponent(pathname),
+  });
+  if (_mwCtx.headers) {
+    for (const [key, value] of _mwCtx.headers) {
+      headers.append(key, value);
+    }
+  }
+  return new Response(null, {
+    status: _mwCtx.status ?? 200,
+    headers,
+  });
+}
+
 // matchPattern is kept for findIntercept (linear scan over small interceptLookup array).
 function matchPattern(urlParts, patternParts) {
   const params = Object.create(null);
@@ -7661,6 +7763,7 @@ const __i18nConfig = null;
 const __configRedirects = [];
 const __configRewrites = {"beforeFiles":[],"afterFiles":[],"fallback":[]};
 const __configHeaders = [];
+const __publicFiles = new Set([]);
 const __allowedOrigins = [];
 
 
@@ -8200,6 +8303,18 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         return new Response("Not Found", { status: 404 });
       }
     }
+  }
+
+  // Serve public/ files as filesystem routes after middleware and before
+  // afterFiles/fallback rewrites, matching Next.js routing semantics.
+  if (
+    (request.method === "GET" || request.method === "HEAD") &&
+    !pathname.endsWith(".rsc") &&
+    __publicFiles.has(cleanPathname)
+  ) {
+    setHeadersContext(null);
+    setNavigationContext(null);
+    return __createStaticFileSignal(cleanPathname, _mwCtx);
   }
 
   // Set navigation context for Server Components.
@@ -9531,6 +9646,21 @@ function matchRoute(url) {
   return _trieMatch(_routeTrie, urlParts);
 }
 
+function __createStaticFileSignal(pathname, _mwCtx) {
+  const headers = new Headers({
+    "x-vinext-static-file": encodeURIComponent(pathname),
+  });
+  if (_mwCtx.headers) {
+    for (const [key, value] of _mwCtx.headers) {
+      headers.append(key, value);
+    }
+  }
+  return new Response(null, {
+    status: _mwCtx.status ?? 200,
+    headers,
+  });
+}
+
 // matchPattern is kept for findIntercept (linear scan over small interceptLookup array).
 function matchPattern(urlParts, patternParts) {
   const params = Object.create(null);
@@ -9888,6 +10018,7 @@ const __i18nConfig = null;
 const __configRedirects = [];
 const __configRewrites = {"beforeFiles":[],"afterFiles":[],"fallback":[]};
 const __configHeaders = [];
+const __publicFiles = new Set([]);
 const __allowedOrigins = [];
 
 
@@ -10424,6 +10555,18 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         return new Response("Not Found", { status: 404 });
       }
     }
+  }
+
+  // Serve public/ files as filesystem routes after middleware and before
+  // afterFiles/fallback rewrites, matching Next.js routing semantics.
+  if (
+    (request.method === "GET" || request.method === "HEAD") &&
+    !pathname.endsWith(".rsc") &&
+    __publicFiles.has(cleanPathname)
+  ) {
+    setHeadersContext(null);
+    setNavigationContext(null);
+    return __createStaticFileSignal(cleanPathname, _mwCtx);
   }
 
   // Set navigation context for Server Components.
@@ -11748,6 +11891,21 @@ function matchRoute(url) {
   return _trieMatch(_routeTrie, urlParts);
 }
 
+function __createStaticFileSignal(pathname, _mwCtx) {
+  const headers = new Headers({
+    "x-vinext-static-file": encodeURIComponent(pathname),
+  });
+  if (_mwCtx.headers) {
+    for (const [key, value] of _mwCtx.headers) {
+      headers.append(key, value);
+    }
+  }
+  return new Response(null, {
+    status: _mwCtx.status ?? 200,
+    headers,
+  });
+}
+
 // matchPattern is kept for findIntercept (linear scan over small interceptLookup array).
 function matchPattern(urlParts, patternParts) {
   const params = Object.create(null);
@@ -12334,6 +12492,7 @@ const __i18nConfig = null;
 const __configRedirects = [];
 const __configRewrites = {"beforeFiles":[],"afterFiles":[],"fallback":[]};
 const __configHeaders = [];
+const __publicFiles = new Set([]);
 const __allowedOrigins = [];
 
 
@@ -13005,6 +13164,18 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         return new Response("Not Found", { status: 404 });
       }
     }
+  }
+
+  // Serve public/ files as filesystem routes after middleware and before
+  // afterFiles/fallback rewrites, matching Next.js routing semantics.
+  if (
+    (request.method === "GET" || request.method === "HEAD") &&
+    !pathname.endsWith(".rsc") &&
+    __publicFiles.has(cleanPathname)
+  ) {
+    setHeadersContext(null);
+    setNavigationContext(null);
+    return __createStaticFileSignal(cleanPathname, _mwCtx);
   }
 
   // Set navigation context for Server Components.

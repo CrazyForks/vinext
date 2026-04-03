@@ -1986,6 +1986,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               bodySizeLimit: nextConfig?.serverActionsBodySizeLimit,
               i18n: nextConfig?.i18n,
               hasPagesDir,
+              publicFiles: scanPublicFileRoutes(root),
             },
             instrumentationPath,
           );
@@ -4070,7 +4071,6 @@ function findFileWithExts(
 
 /** Module-level cache for hasMdxFiles — avoids re-scanning per Vite environment. */
 const _mdxScanCache = new Map<string, boolean>();
-
 /**
  * Check if the project has .mdx files in app/ or pages/ directories.
  */
@@ -4106,6 +4106,60 @@ function scanDirForMdx(dir: string): boolean {
   return false;
 }
 
+function scanPublicFileRoutes(root: string): string[] {
+  const publicDir = path.join(root, "public");
+  const routes: string[] = [];
+  const visitedDirs = new Set<string>();
+
+  function walk(dir: string): void {
+    let realDir: string;
+    try {
+      realDir = fs.realpathSync(dir);
+    } catch {
+      return;
+    }
+    if (visitedDirs.has(realDir)) return;
+    visitedDirs.add(realDir);
+
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(fullPath);
+        continue;
+      }
+      if (entry.isSymbolicLink()) {
+        let stat: fs.Stats;
+        try {
+          stat = fs.statSync(fullPath);
+        } catch {
+          continue;
+        }
+        if (stat.isDirectory()) {
+          walk(fullPath);
+          continue;
+        }
+        if (!stat.isFile()) continue;
+      } else if (!entry.isFile()) {
+        continue;
+      }
+      const relativePath = path.relative(publicDir, fullPath).split(path.sep).join("/");
+      routes.push("/" + relativePath);
+    }
+  }
+
+  if (fs.existsSync(publicDir)) {
+    try {
+      walk(publicDir);
+    } catch {
+      // ignore unreadable dirs
+    }
+  }
+
+  routes.sort();
+  return routes;
+}
+
 // Public exports for static export
 export { staticExportPages, staticExportApp } from "./build/static-export.js";
 export type {
@@ -4132,6 +4186,7 @@ export { resolvePostcssStringPlugins as _resolvePostcssStringPlugins };
 export { _postcssCache };
 export { hasMdxFiles as _hasMdxFiles };
 export { _mdxScanCache };
+export { scanPublicFileRoutes as _scanPublicFileRoutes };
 export { parseStaticObjectLiteral as _parseStaticObjectLiteral };
 export { _findBalancedObject, _findCallEnd };
 export { stripServerExports as _stripServerExports };
