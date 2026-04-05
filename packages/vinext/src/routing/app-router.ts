@@ -258,7 +258,11 @@ function discoverSlotSubRoutes(
         // that useSelectedLayoutSegments() sees the correct segment list at runtime.
         rawSegments: string[];
         // Pre-computed URL parts, params, isDynamic from convertSegmentsToRouteParts.
-        converted: { urlSegments: string[]; params: string[]; isDynamic: boolean };
+        converted: {
+          urlSegments: string[];
+          params: string[];
+          isDynamic: boolean;
+        };
         slotPages: Map<string, string>;
       }
     >();
