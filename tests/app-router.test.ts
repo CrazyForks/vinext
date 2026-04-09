@@ -3872,6 +3872,7 @@ describe("App Router external rewrite proxy credential forwarding", () => {
         "x-api-key": "sk_live_secret",
         "proxy-authorization": "Basic cHJveHk=",
         "x-middleware-next": "1",
+        "x-vinext-prerender-secret": "build-secret-123",
         "x-custom-safe": "keep-me",
       },
     });
@@ -3884,6 +3885,7 @@ describe("App Router external rewrite proxy credential forwarding", () => {
     expect(capturedHeaders!["proxy-authorization"]).toBe("Basic cHJveHk=");
     // Internal middleware headers must be stripped
     expect(capturedHeaders!["x-middleware-next"]).toBeUndefined();
+    expect(capturedHeaders!["x-vinext-prerender-secret"]).toBeUndefined();
     // Non-sensitive headers must be preserved
     expect(capturedHeaders!["x-custom-safe"]).toBe("keep-me");
   });
