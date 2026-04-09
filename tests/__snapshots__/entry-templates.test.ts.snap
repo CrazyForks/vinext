@@ -87,6 +87,7 @@ import {
 import {
   mergeMiddlewareResponseHeaders as __mergeMiddlewareResponseHeaders,
 } from "<ROOT>/packages/vinext/src/server/app-page-response.js";
+import { getScriptNonceFromHeaderSources as __getScriptNonceFromHeaderSources } from "<ROOT>/packages/vinext/src/server/csp.js";
 import {
   buildAppPageElement as __buildAppPageElement,
   resolveAppPageIntercept as __resolveAppPageIntercept,
@@ -493,7 +494,7 @@ const rootLayouts = [mod_1];
  * @param opts.boundaryComponent - Override the boundary component (for layout-level notFound)
  * @param opts.layouts - Override the layouts to wrap with (for layout-level notFound, excludes the throwing layout)
  */
-async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, opts) {
+async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, opts, scriptNonce) {
   return __renderAppPageHttpAccessFallback({
     boundaryComponent: opts?.boundaryComponent ?? null,
     buildFontLinkHeader: __buildAppPageFontLinkHeader,
@@ -524,13 +525,14 @@ async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, req
     rootUnauthorizedModule: rootUnauthorizedModule,
     route,
     renderToReadableStream,
+    scriptNonce,
     statusCode,
   });
 }
 
 /** Convenience: render a not-found page (404) */
-async function renderNotFoundPage(route, isRscRequest, request, matchedParams) {
-  return renderHTTPAccessFallbackPage(route, 404, isRscRequest, request, { matchedParams });
+async function renderNotFoundPage(route, isRscRequest, request, matchedParams, scriptNonce) {
+  return renderHTTPAccessFallbackPage(route, 404, isRscRequest, request, { matchedParams }, scriptNonce);
 }
 
 /**
@@ -540,7 +542,7 @@ async function renderNotFoundPage(route, isRscRequest, request, matchedParams) {
  * Next.js returns HTTP 200 when error.tsx catches an error (the error is "handled"
  * by the boundary). This matches that behavior intentionally.
  */
-async function renderErrorBoundaryPage(route, error, isRscRequest, request, matchedParams) {
+async function renderErrorBoundaryPage(route, error, isRscRequest, request, matchedParams, scriptNonce) {
   return __renderAppPageErrorBoundary({
     buildFontLinkHeader: __buildAppPageFontLinkHeader,
     clearRequestContext() {
@@ -568,6 +570,7 @@ async function renderErrorBoundaryPage(route, error, isRscRequest, request, matc
     route,
     renderToReadableStream,
     sanitizeErrorForClient: __sanitizeErrorForClient,
+    scriptNonce,
   });
 }
 
@@ -1227,6 +1230,8 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
 
   
 
+  const _scriptNonce = __getScriptNonceFromHeaderSources(request.headers, _mwCtx.headers);
+
   // Build post-middleware request context for afterFiles/fallback rewrites.
   // These run after middleware in the App Router execution order and should
   // evaluate has/missing conditions against middleware-modified headers.
@@ -1562,7 +1567,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   if (!match) {
     
     // Render custom not-found page if available, otherwise plain 404
-    const notFoundResponse = await renderNotFoundPage(null, isRscRequest, request);
+    const notFoundResponse = await renderNotFoundPage(null, isRscRequest, request, undefined, _scriptNonce);
     if (notFoundResponse) return notFoundResponse;
     setHeadersContext(null);
     setNavigationContext(null);
@@ -1775,6 +1780,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   if (
     process.env.NODE_ENV === "production" &&
     !isForceDynamic &&
+    (isRscRequest || !_scriptNonce) &&
     revalidateSeconds !== null && revalidateSeconds > 0 && revalidateSeconds !== Infinity
   ) {
     const __cachedPageResponse = await __readAppPageCacheResponse({
@@ -1930,7 +1936,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       return buildPageElement(route, params, interceptOpts, url.searchParams);
     },
     renderErrorBoundaryPage(buildErr) {
-      return renderErrorBoundaryPage(route, buildErr, isRscRequest, request, params);
+      return renderErrorBoundaryPage(route, buildErr, isRscRequest, request, params, _scriptNonce);
     },
     renderSpecialError(__buildSpecialError) {
       return __buildAppPageSpecialErrorResponse({
@@ -1939,9 +1945,16 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           setNavigationContext(null);
         },
         renderFallbackPage(statusCode) {
-          return renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, {
-            matchedParams: params,
-          });
+          return renderHTTPAccessFallbackPage(
+            route,
+            statusCode,
+            isRscRequest,
+            request,
+            {
+              matchedParams: params,
+            },
+            _scriptNonce,
+          );
         },
         requestUrl: request.url,
         specialError: __buildSpecialError,
@@ -2020,7 +2033,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     },
     revalidateSeconds,
     renderErrorBoundaryResponse(renderErr) {
-      return renderErrorBoundaryPage(route, renderErr, isRscRequest, request, params);
+      return renderErrorBoundaryPage(route, renderErr, isRscRequest, request, params, _scriptNonce);
     },
     async renderLayoutSpecialError(__layoutSpecialError, li) {
       return __buildAppPageSpecialErrorResponse({
@@ -2043,11 +2056,18 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           }
           if (!parentNotFound) parentNotFound = null;
           const parentLayouts = route.layouts.slice(0, li);
-          return renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, {
-            boundaryComponent: parentNotFound,
-            layouts: parentLayouts,
-            matchedParams: params,
-          });
+          return renderHTTPAccessFallbackPage(
+            route,
+            statusCode,
+            isRscRequest,
+            request,
+            {
+              boundaryComponent: parentNotFound,
+              layouts: parentLayouts,
+              matchedParams: params,
+            },
+            _scriptNonce,
+          );
         },
         requestUrl: request.url,
         specialError: __layoutSpecialError,
@@ -2060,9 +2080,16 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           setNavigationContext(null);
         },
         renderFallbackPage(statusCode) {
-          return renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, {
-            matchedParams: params,
-          });
+          return renderHTTPAccessFallbackPage(
+            route,
+            statusCode,
+            isRscRequest,
+            request,
+            {
+              matchedParams: params,
+            },
+            _scriptNonce,
+          );
         },
         requestUrl: request.url,
         specialError,
@@ -2077,6 +2104,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       // each have their own ALS store and are unaffected.
       return _suppressHookWarningAls.run(true, probe);
     },
+    scriptNonce: _scriptNonce,
     waitUntil(__cachePromise) {
       _getRequestExecutionContext()?.waitUntil(__cachePromise);
     },
@@ -2174,6 +2202,7 @@ import {
 import {
   mergeMiddlewareResponseHeaders as __mergeMiddlewareResponseHeaders,
 } from "<ROOT>/packages/vinext/src/server/app-page-response.js";
+import { getScriptNonceFromHeaderSources as __getScriptNonceFromHeaderSources } from "<ROOT>/packages/vinext/src/server/csp.js";
 import {
   buildAppPageElement as __buildAppPageElement,
   resolveAppPageIntercept as __resolveAppPageIntercept,
@@ -2580,7 +2609,7 @@ const rootLayouts = [mod_1];
  * @param opts.boundaryComponent - Override the boundary component (for layout-level notFound)
  * @param opts.layouts - Override the layouts to wrap with (for layout-level notFound, excludes the throwing layout)
  */
-async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, opts) {
+async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, opts, scriptNonce) {
   return __renderAppPageHttpAccessFallback({
     boundaryComponent: opts?.boundaryComponent ?? null,
     buildFontLinkHeader: __buildAppPageFontLinkHeader,
@@ -2611,13 +2640,14 @@ async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, req
     rootUnauthorizedModule: rootUnauthorizedModule,
     route,
     renderToReadableStream,
+    scriptNonce,
     statusCode,
   });
 }
 
 /** Convenience: render a not-found page (404) */
-async function renderNotFoundPage(route, isRscRequest, request, matchedParams) {
-  return renderHTTPAccessFallbackPage(route, 404, isRscRequest, request, { matchedParams });
+async function renderNotFoundPage(route, isRscRequest, request, matchedParams, scriptNonce) {
+  return renderHTTPAccessFallbackPage(route, 404, isRscRequest, request, { matchedParams }, scriptNonce);
 }
 
 /**
@@ -2627,7 +2657,7 @@ async function renderNotFoundPage(route, isRscRequest, request, matchedParams) {
  * Next.js returns HTTP 200 when error.tsx catches an error (the error is "handled"
  * by the boundary). This matches that behavior intentionally.
  */
-async function renderErrorBoundaryPage(route, error, isRscRequest, request, matchedParams) {
+async function renderErrorBoundaryPage(route, error, isRscRequest, request, matchedParams, scriptNonce) {
   return __renderAppPageErrorBoundary({
     buildFontLinkHeader: __buildAppPageFontLinkHeader,
     clearRequestContext() {
@@ -2655,6 +2685,7 @@ async function renderErrorBoundaryPage(route, error, isRscRequest, request, matc
     route,
     renderToReadableStream,
     sanitizeErrorForClient: __sanitizeErrorForClient,
+    scriptNonce,
   });
 }
 
@@ -3320,6 +3351,8 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
 
   
 
+  const _scriptNonce = __getScriptNonceFromHeaderSources(request.headers, _mwCtx.headers);
+
   // Build post-middleware request context for afterFiles/fallback rewrites.
   // These run after middleware in the App Router execution order and should
   // evaluate has/missing conditions against middleware-modified headers.
@@ -3655,7 +3688,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   if (!match) {
     
     // Render custom not-found page if available, otherwise plain 404
-    const notFoundResponse = await renderNotFoundPage(null, isRscRequest, request);
+    const notFoundResponse = await renderNotFoundPage(null, isRscRequest, request, undefined, _scriptNonce);
     if (notFoundResponse) return notFoundResponse;
     setHeadersContext(null);
     setNavigationContext(null);
@@ -3868,6 +3901,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   if (
     process.env.NODE_ENV === "production" &&
     !isForceDynamic &&
+    (isRscRequest || !_scriptNonce) &&
     revalidateSeconds !== null && revalidateSeconds > 0 && revalidateSeconds !== Infinity
   ) {
     const __cachedPageResponse = await __readAppPageCacheResponse({
@@ -4023,7 +4057,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       return buildPageElement(route, params, interceptOpts, url.searchParams);
     },
     renderErrorBoundaryPage(buildErr) {
-      return renderErrorBoundaryPage(route, buildErr, isRscRequest, request, params);
+      return renderErrorBoundaryPage(route, buildErr, isRscRequest, request, params, _scriptNonce);
     },
     renderSpecialError(__buildSpecialError) {
       return __buildAppPageSpecialErrorResponse({
@@ -4032,9 +4066,16 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           setNavigationContext(null);
         },
         renderFallbackPage(statusCode) {
-          return renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, {
-            matchedParams: params,
-          });
+          return renderHTTPAccessFallbackPage(
+            route,
+            statusCode,
+            isRscRequest,
+            request,
+            {
+              matchedParams: params,
+            },
+            _scriptNonce,
+          );
         },
         requestUrl: request.url,
         specialError: __buildSpecialError,
@@ -4113,7 +4154,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     },
     revalidateSeconds,
     renderErrorBoundaryResponse(renderErr) {
-      return renderErrorBoundaryPage(route, renderErr, isRscRequest, request, params);
+      return renderErrorBoundaryPage(route, renderErr, isRscRequest, request, params, _scriptNonce);
     },
     async renderLayoutSpecialError(__layoutSpecialError, li) {
       return __buildAppPageSpecialErrorResponse({
@@ -4136,11 +4177,18 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           }
           if (!parentNotFound) parentNotFound = null;
           const parentLayouts = route.layouts.slice(0, li);
-          return renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, {
-            boundaryComponent: parentNotFound,
-            layouts: parentLayouts,
-            matchedParams: params,
-          });
+          return renderHTTPAccessFallbackPage(
+            route,
+            statusCode,
+            isRscRequest,
+            request,
+            {
+              boundaryComponent: parentNotFound,
+              layouts: parentLayouts,
+              matchedParams: params,
+            },
+            _scriptNonce,
+          );
         },
         requestUrl: request.url,
         specialError: __layoutSpecialError,
@@ -4153,9 +4201,16 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           setNavigationContext(null);
         },
         renderFallbackPage(statusCode) {
-          return renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, {
-            matchedParams: params,
-          });
+          return renderHTTPAccessFallbackPage(
+            route,
+            statusCode,
+            isRscRequest,
+            request,
+            {
+              matchedParams: params,
+            },
+            _scriptNonce,
+          );
         },
         requestUrl: request.url,
         specialError,
@@ -4170,6 +4225,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       // each have their own ALS store and are unaffected.
       return _suppressHookWarningAls.run(true, probe);
     },
+    scriptNonce: _scriptNonce,
     waitUntil(__cachePromise) {
       _getRequestExecutionContext()?.waitUntil(__cachePromise);
     },
@@ -4267,6 +4323,7 @@ import {
 import {
   mergeMiddlewareResponseHeaders as __mergeMiddlewareResponseHeaders,
 } from "<ROOT>/packages/vinext/src/server/app-page-response.js";
+import { getScriptNonceFromHeaderSources as __getScriptNonceFromHeaderSources } from "<ROOT>/packages/vinext/src/server/csp.js";
 import {
   buildAppPageElement as __buildAppPageElement,
   resolveAppPageIntercept as __resolveAppPageIntercept,
@@ -4674,7 +4731,7 @@ const rootLayouts = [mod_1];
  * @param opts.boundaryComponent - Override the boundary component (for layout-level notFound)
  * @param opts.layouts - Override the layouts to wrap with (for layout-level notFound, excludes the throwing layout)
  */
-async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, opts) {
+async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, opts, scriptNonce) {
   return __renderAppPageHttpAccessFallback({
     boundaryComponent: opts?.boundaryComponent ?? null,
     buildFontLinkHeader: __buildAppPageFontLinkHeader,
@@ -4705,13 +4762,14 @@ async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, req
     rootUnauthorizedModule: rootUnauthorizedModule,
     route,
     renderToReadableStream,
+    scriptNonce,
     statusCode,
   });
 }
 
 /** Convenience: render a not-found page (404) */
-async function renderNotFoundPage(route, isRscRequest, request, matchedParams) {
-  return renderHTTPAccessFallbackPage(route, 404, isRscRequest, request, { matchedParams });
+async function renderNotFoundPage(route, isRscRequest, request, matchedParams, scriptNonce) {
+  return renderHTTPAccessFallbackPage(route, 404, isRscRequest, request, { matchedParams }, scriptNonce);
 }
 
 /**
@@ -4721,7 +4779,7 @@ async function renderNotFoundPage(route, isRscRequest, request, matchedParams) {
  * Next.js returns HTTP 200 when error.tsx catches an error (the error is "handled"
  * by the boundary). This matches that behavior intentionally.
  */
-async function renderErrorBoundaryPage(route, error, isRscRequest, request, matchedParams) {
+async function renderErrorBoundaryPage(route, error, isRscRequest, request, matchedParams, scriptNonce) {
   return __renderAppPageErrorBoundary({
     buildFontLinkHeader: __buildAppPageFontLinkHeader,
     clearRequestContext() {
@@ -4749,6 +4807,7 @@ async function renderErrorBoundaryPage(route, error, isRscRequest, request, matc
     route,
     renderToReadableStream,
     sanitizeErrorForClient: __sanitizeErrorForClient,
+    scriptNonce,
   });
 }
 
@@ -5408,6 +5467,8 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
 
   
 
+  const _scriptNonce = __getScriptNonceFromHeaderSources(request.headers, _mwCtx.headers);
+
   // Build post-middleware request context for afterFiles/fallback rewrites.
   // These run after middleware in the App Router execution order and should
   // evaluate has/missing conditions against middleware-modified headers.
@@ -5743,7 +5804,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   if (!match) {
     
     // Render custom not-found page if available, otherwise plain 404
-    const notFoundResponse = await renderNotFoundPage(null, isRscRequest, request);
+    const notFoundResponse = await renderNotFoundPage(null, isRscRequest, request, undefined, _scriptNonce);
     if (notFoundResponse) return notFoundResponse;
     setHeadersContext(null);
     setNavigationContext(null);
@@ -5956,6 +6017,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   if (
     process.env.NODE_ENV === "production" &&
     !isForceDynamic &&
+    (isRscRequest || !_scriptNonce) &&
     revalidateSeconds !== null && revalidateSeconds > 0 && revalidateSeconds !== Infinity
   ) {
     const __cachedPageResponse = await __readAppPageCacheResponse({
@@ -6111,7 +6173,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       return buildPageElement(route, params, interceptOpts, url.searchParams);
     },
     renderErrorBoundaryPage(buildErr) {
-      return renderErrorBoundaryPage(route, buildErr, isRscRequest, request, params);
+      return renderErrorBoundaryPage(route, buildErr, isRscRequest, request, params, _scriptNonce);
     },
     renderSpecialError(__buildSpecialError) {
       return __buildAppPageSpecialErrorResponse({
@@ -6120,9 +6182,16 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           setNavigationContext(null);
         },
         renderFallbackPage(statusCode) {
-          return renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, {
-            matchedParams: params,
-          });
+          return renderHTTPAccessFallbackPage(
+            route,
+            statusCode,
+            isRscRequest,
+            request,
+            {
+              matchedParams: params,
+            },
+            _scriptNonce,
+          );
         },
         requestUrl: request.url,
         specialError: __buildSpecialError,
@@ -6201,7 +6270,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     },
     revalidateSeconds,
     renderErrorBoundaryResponse(renderErr) {
-      return renderErrorBoundaryPage(route, renderErr, isRscRequest, request, params);
+      return renderErrorBoundaryPage(route, renderErr, isRscRequest, request, params, _scriptNonce);
     },
     async renderLayoutSpecialError(__layoutSpecialError, li) {
       return __buildAppPageSpecialErrorResponse({
@@ -6224,11 +6293,18 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           }
           if (!parentNotFound) parentNotFound = null;
           const parentLayouts = route.layouts.slice(0, li);
-          return renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, {
-            boundaryComponent: parentNotFound,
-            layouts: parentLayouts,
-            matchedParams: params,
-          });
+          return renderHTTPAccessFallbackPage(
+            route,
+            statusCode,
+            isRscRequest,
+            request,
+            {
+              boundaryComponent: parentNotFound,
+              layouts: parentLayouts,
+              matchedParams: params,
+            },
+            _scriptNonce,
+          );
         },
         requestUrl: request.url,
         specialError: __layoutSpecialError,
@@ -6241,9 +6317,16 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           setNavigationContext(null);
         },
         renderFallbackPage(statusCode) {
-          return renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, {
-            matchedParams: params,
-          });
+          return renderHTTPAccessFallbackPage(
+            route,
+            statusCode,
+            isRscRequest,
+            request,
+            {
+              matchedParams: params,
+            },
+            _scriptNonce,
+          );
         },
         requestUrl: request.url,
         specialError,
@@ -6258,6 +6341,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       // each have their own ALS store and are unaffected.
       return _suppressHookWarningAls.run(true, probe);
     },
+    scriptNonce: _scriptNonce,
     waitUntil(__cachePromise) {
       _getRequestExecutionContext()?.waitUntil(__cachePromise);
     },
@@ -6355,6 +6439,7 @@ import {
 import {
   mergeMiddlewareResponseHeaders as __mergeMiddlewareResponseHeaders,
 } from "<ROOT>/packages/vinext/src/server/app-page-response.js";
+import { getScriptNonceFromHeaderSources as __getScriptNonceFromHeaderSources } from "<ROOT>/packages/vinext/src/server/csp.js";
 import {
   buildAppPageElement as __buildAppPageElement,
   resolveAppPageIntercept as __resolveAppPageIntercept,
@@ -6791,7 +6876,7 @@ const rootLayouts = [mod_1];
  * @param opts.boundaryComponent - Override the boundary component (for layout-level notFound)
  * @param opts.layouts - Override the layouts to wrap with (for layout-level notFound, excludes the throwing layout)
  */
-async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, opts) {
+async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, opts, scriptNonce) {
   return __renderAppPageHttpAccessFallback({
     boundaryComponent: opts?.boundaryComponent ?? null,
     buildFontLinkHeader: __buildAppPageFontLinkHeader,
@@ -6822,13 +6907,14 @@ async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, req
     rootUnauthorizedModule: rootUnauthorizedModule,
     route,
     renderToReadableStream,
+    scriptNonce,
     statusCode,
   });
 }
 
 /** Convenience: render a not-found page (404) */
-async function renderNotFoundPage(route, isRscRequest, request, matchedParams) {
-  return renderHTTPAccessFallbackPage(route, 404, isRscRequest, request, { matchedParams });
+async function renderNotFoundPage(route, isRscRequest, request, matchedParams, scriptNonce) {
+  return renderHTTPAccessFallbackPage(route, 404, isRscRequest, request, { matchedParams }, scriptNonce);
 }
 
 /**
@@ -6838,7 +6924,7 @@ async function renderNotFoundPage(route, isRscRequest, request, matchedParams) {
  * Next.js returns HTTP 200 when error.tsx catches an error (the error is "handled"
  * by the boundary). This matches that behavior intentionally.
  */
-async function renderErrorBoundaryPage(route, error, isRscRequest, request, matchedParams) {
+async function renderErrorBoundaryPage(route, error, isRscRequest, request, matchedParams, scriptNonce) {
   return __renderAppPageErrorBoundary({
     buildFontLinkHeader: __buildAppPageFontLinkHeader,
     clearRequestContext() {
@@ -6866,6 +6952,7 @@ async function renderErrorBoundaryPage(route, error, isRscRequest, request, matc
     route,
     renderToReadableStream,
     sanitizeErrorForClient: __sanitizeErrorForClient,
+    scriptNonce,
   });
 }
 
@@ -7528,6 +7615,8 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
 
   
 
+  const _scriptNonce = __getScriptNonceFromHeaderSources(request.headers, _mwCtx.headers);
+
   // Build post-middleware request context for afterFiles/fallback rewrites.
   // These run after middleware in the App Router execution order and should
   // evaluate has/missing conditions against middleware-modified headers.
@@ -7863,7 +7952,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   if (!match) {
     
     // Render custom not-found page if available, otherwise plain 404
-    const notFoundResponse = await renderNotFoundPage(null, isRscRequest, request);
+    const notFoundResponse = await renderNotFoundPage(null, isRscRequest, request, undefined, _scriptNonce);
     if (notFoundResponse) return notFoundResponse;
     setHeadersContext(null);
     setNavigationContext(null);
@@ -8076,6 +8165,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   if (
     process.env.NODE_ENV === "production" &&
     !isForceDynamic &&
+    (isRscRequest || !_scriptNonce) &&
     revalidateSeconds !== null && revalidateSeconds > 0 && revalidateSeconds !== Infinity
   ) {
     const __cachedPageResponse = await __readAppPageCacheResponse({
@@ -8231,7 +8321,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       return buildPageElement(route, params, interceptOpts, url.searchParams);
     },
     renderErrorBoundaryPage(buildErr) {
-      return renderErrorBoundaryPage(route, buildErr, isRscRequest, request, params);
+      return renderErrorBoundaryPage(route, buildErr, isRscRequest, request, params, _scriptNonce);
     },
     renderSpecialError(__buildSpecialError) {
       return __buildAppPageSpecialErrorResponse({
@@ -8240,9 +8330,16 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           setNavigationContext(null);
         },
         renderFallbackPage(statusCode) {
-          return renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, {
-            matchedParams: params,
-          });
+          return renderHTTPAccessFallbackPage(
+            route,
+            statusCode,
+            isRscRequest,
+            request,
+            {
+              matchedParams: params,
+            },
+            _scriptNonce,
+          );
         },
         requestUrl: request.url,
         specialError: __buildSpecialError,
@@ -8321,7 +8418,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     },
     revalidateSeconds,
     renderErrorBoundaryResponse(renderErr) {
-      return renderErrorBoundaryPage(route, renderErr, isRscRequest, request, params);
+      return renderErrorBoundaryPage(route, renderErr, isRscRequest, request, params, _scriptNonce);
     },
     async renderLayoutSpecialError(__layoutSpecialError, li) {
       return __buildAppPageSpecialErrorResponse({
@@ -8344,11 +8441,18 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           }
           if (!parentNotFound) parentNotFound = null;
           const parentLayouts = route.layouts.slice(0, li);
-          return renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, {
-            boundaryComponent: parentNotFound,
-            layouts: parentLayouts,
-            matchedParams: params,
-          });
+          return renderHTTPAccessFallbackPage(
+            route,
+            statusCode,
+            isRscRequest,
+            request,
+            {
+              boundaryComponent: parentNotFound,
+              layouts: parentLayouts,
+              matchedParams: params,
+            },
+            _scriptNonce,
+          );
         },
         requestUrl: request.url,
         specialError: __layoutSpecialError,
@@ -8361,9 +8465,16 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           setNavigationContext(null);
         },
         renderFallbackPage(statusCode) {
-          return renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, {
-            matchedParams: params,
-          });
+          return renderHTTPAccessFallbackPage(
+            route,
+            statusCode,
+            isRscRequest,
+            request,
+            {
+              matchedParams: params,
+            },
+            _scriptNonce,
+          );
         },
         requestUrl: request.url,
         specialError,
@@ -8378,6 +8489,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       // each have their own ALS store and are unaffected.
       return _suppressHookWarningAls.run(true, probe);
     },
+    scriptNonce: _scriptNonce,
     waitUntil(__cachePromise) {
       _getRequestExecutionContext()?.waitUntil(__cachePromise);
     },
@@ -8475,6 +8587,7 @@ import {
 import {
   mergeMiddlewareResponseHeaders as __mergeMiddlewareResponseHeaders,
 } from "<ROOT>/packages/vinext/src/server/app-page-response.js";
+import { getScriptNonceFromHeaderSources as __getScriptNonceFromHeaderSources } from "<ROOT>/packages/vinext/src/server/csp.js";
 import {
   buildAppPageElement as __buildAppPageElement,
   resolveAppPageIntercept as __resolveAppPageIntercept,
@@ -8888,7 +9001,7 @@ const rootLayouts = [mod_1];
  * @param opts.boundaryComponent - Override the boundary component (for layout-level notFound)
  * @param opts.layouts - Override the layouts to wrap with (for layout-level notFound, excludes the throwing layout)
  */
-async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, opts) {
+async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, opts, scriptNonce) {
   return __renderAppPageHttpAccessFallback({
     boundaryComponent: opts?.boundaryComponent ?? null,
     buildFontLinkHeader: __buildAppPageFontLinkHeader,
@@ -8919,13 +9032,14 @@ async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, req
     rootUnauthorizedModule: rootUnauthorizedModule,
     route,
     renderToReadableStream,
+    scriptNonce,
     statusCode,
   });
 }
 
 /** Convenience: render a not-found page (404) */
-async function renderNotFoundPage(route, isRscRequest, request, matchedParams) {
-  return renderHTTPAccessFallbackPage(route, 404, isRscRequest, request, { matchedParams });
+async function renderNotFoundPage(route, isRscRequest, request, matchedParams, scriptNonce) {
+  return renderHTTPAccessFallbackPage(route, 404, isRscRequest, request, { matchedParams }, scriptNonce);
 }
 
 /**
@@ -8935,7 +9049,7 @@ async function renderNotFoundPage(route, isRscRequest, request, matchedParams) {
  * Next.js returns HTTP 200 when error.tsx catches an error (the error is "handled"
  * by the boundary). This matches that behavior intentionally.
  */
-async function renderErrorBoundaryPage(route, error, isRscRequest, request, matchedParams) {
+async function renderErrorBoundaryPage(route, error, isRscRequest, request, matchedParams, scriptNonce) {
   return __renderAppPageErrorBoundary({
     buildFontLinkHeader: __buildAppPageFontLinkHeader,
     clearRequestContext() {
@@ -8963,6 +9077,7 @@ async function renderErrorBoundaryPage(route, error, isRscRequest, request, matc
     route,
     renderToReadableStream,
     sanitizeErrorForClient: __sanitizeErrorForClient,
+    scriptNonce,
   });
 }
 
@@ -9622,6 +9737,8 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
 
   
 
+  const _scriptNonce = __getScriptNonceFromHeaderSources(request.headers, _mwCtx.headers);
+
   // Build post-middleware request context for afterFiles/fallback rewrites.
   // These run after middleware in the App Router execution order and should
   // evaluate has/missing conditions against middleware-modified headers.
@@ -9957,7 +10074,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   if (!match) {
     
     // Render custom not-found page if available, otherwise plain 404
-    const notFoundResponse = await renderNotFoundPage(null, isRscRequest, request);
+    const notFoundResponse = await renderNotFoundPage(null, isRscRequest, request, undefined, _scriptNonce);
     if (notFoundResponse) return notFoundResponse;
     setHeadersContext(null);
     setNavigationContext(null);
@@ -10170,6 +10287,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   if (
     process.env.NODE_ENV === "production" &&
     !isForceDynamic &&
+    (isRscRequest || !_scriptNonce) &&
     revalidateSeconds !== null && revalidateSeconds > 0 && revalidateSeconds !== Infinity
   ) {
     const __cachedPageResponse = await __readAppPageCacheResponse({
@@ -10325,7 +10443,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       return buildPageElement(route, params, interceptOpts, url.searchParams);
     },
     renderErrorBoundaryPage(buildErr) {
-      return renderErrorBoundaryPage(route, buildErr, isRscRequest, request, params);
+      return renderErrorBoundaryPage(route, buildErr, isRscRequest, request, params, _scriptNonce);
     },
     renderSpecialError(__buildSpecialError) {
       return __buildAppPageSpecialErrorResponse({
@@ -10334,9 +10452,16 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           setNavigationContext(null);
         },
         renderFallbackPage(statusCode) {
-          return renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, {
-            matchedParams: params,
-          });
+          return renderHTTPAccessFallbackPage(
+            route,
+            statusCode,
+            isRscRequest,
+            request,
+            {
+              matchedParams: params,
+            },
+            _scriptNonce,
+          );
         },
         requestUrl: request.url,
         specialError: __buildSpecialError,
@@ -10415,7 +10540,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     },
     revalidateSeconds,
     renderErrorBoundaryResponse(renderErr) {
-      return renderErrorBoundaryPage(route, renderErr, isRscRequest, request, params);
+      return renderErrorBoundaryPage(route, renderErr, isRscRequest, request, params, _scriptNonce);
     },
     async renderLayoutSpecialError(__layoutSpecialError, li) {
       return __buildAppPageSpecialErrorResponse({
@@ -10438,11 +10563,18 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           }
           if (!parentNotFound) parentNotFound = null;
           const parentLayouts = route.layouts.slice(0, li);
-          return renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, {
-            boundaryComponent: parentNotFound,
-            layouts: parentLayouts,
-            matchedParams: params,
-          });
+          return renderHTTPAccessFallbackPage(
+            route,
+            statusCode,
+            isRscRequest,
+            request,
+            {
+              boundaryComponent: parentNotFound,
+              layouts: parentLayouts,
+              matchedParams: params,
+            },
+            _scriptNonce,
+          );
         },
         requestUrl: request.url,
         specialError: __layoutSpecialError,
@@ -10455,9 +10587,16 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           setNavigationContext(null);
         },
         renderFallbackPage(statusCode) {
-          return renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, {
-            matchedParams: params,
-          });
+          return renderHTTPAccessFallbackPage(
+            route,
+            statusCode,
+            isRscRequest,
+            request,
+            {
+              matchedParams: params,
+            },
+            _scriptNonce,
+          );
         },
         requestUrl: request.url,
         specialError,
@@ -10472,6 +10611,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       // each have their own ALS store and are unaffected.
       return _suppressHookWarningAls.run(true, probe);
     },
+    scriptNonce: _scriptNonce,
     waitUntil(__cachePromise) {
       _getRequestExecutionContext()?.waitUntil(__cachePromise);
     },
@@ -10569,6 +10709,7 @@ import {
 import {
   mergeMiddlewareResponseHeaders as __mergeMiddlewareResponseHeaders,
 } from "<ROOT>/packages/vinext/src/server/app-page-response.js";
+import { getScriptNonceFromHeaderSources as __getScriptNonceFromHeaderSources } from "<ROOT>/packages/vinext/src/server/csp.js";
 import {
   buildAppPageElement as __buildAppPageElement,
   resolveAppPageIntercept as __resolveAppPageIntercept,
@@ -10975,7 +11116,7 @@ const rootLayouts = [mod_1];
  * @param opts.boundaryComponent - Override the boundary component (for layout-level notFound)
  * @param opts.layouts - Override the layouts to wrap with (for layout-level notFound, excludes the throwing layout)
  */
-async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, opts) {
+async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, opts, scriptNonce) {
   return __renderAppPageHttpAccessFallback({
     boundaryComponent: opts?.boundaryComponent ?? null,
     buildFontLinkHeader: __buildAppPageFontLinkHeader,
@@ -11006,13 +11147,14 @@ async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, req
     rootUnauthorizedModule: rootUnauthorizedModule,
     route,
     renderToReadableStream,
+    scriptNonce,
     statusCode,
   });
 }
 
 /** Convenience: render a not-found page (404) */
-async function renderNotFoundPage(route, isRscRequest, request, matchedParams) {
-  return renderHTTPAccessFallbackPage(route, 404, isRscRequest, request, { matchedParams });
+async function renderNotFoundPage(route, isRscRequest, request, matchedParams, scriptNonce) {
+  return renderHTTPAccessFallbackPage(route, 404, isRscRequest, request, { matchedParams }, scriptNonce);
 }
 
 /**
@@ -11022,7 +11164,7 @@ async function renderNotFoundPage(route, isRscRequest, request, matchedParams) {
  * Next.js returns HTTP 200 when error.tsx catches an error (the error is "handled"
  * by the boundary). This matches that behavior intentionally.
  */
-async function renderErrorBoundaryPage(route, error, isRscRequest, request, matchedParams) {
+async function renderErrorBoundaryPage(route, error, isRscRequest, request, matchedParams, scriptNonce) {
   return __renderAppPageErrorBoundary({
     buildFontLinkHeader: __buildAppPageFontLinkHeader,
     clearRequestContext() {
@@ -11050,6 +11192,7 @@ async function renderErrorBoundaryPage(route, error, isRscRequest, request, matc
     route,
     renderToReadableStream,
     sanitizeErrorForClient: __sanitizeErrorForClient,
+    scriptNonce,
   });
 }
 
@@ -12073,6 +12216,8 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   }
   
 
+  const _scriptNonce = __getScriptNonceFromHeaderSources(request.headers, _mwCtx.headers);
+
   // Build post-middleware request context for afterFiles/fallback rewrites.
   // These run after middleware in the App Router execution order and should
   // evaluate has/missing conditions against middleware-modified headers.
@@ -12408,7 +12553,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   if (!match) {
     
     // Render custom not-found page if available, otherwise plain 404
-    const notFoundResponse = await renderNotFoundPage(null, isRscRequest, request);
+    const notFoundResponse = await renderNotFoundPage(null, isRscRequest, request, undefined, _scriptNonce);
     if (notFoundResponse) return notFoundResponse;
     setHeadersContext(null);
     setNavigationContext(null);
@@ -12621,6 +12766,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   if (
     process.env.NODE_ENV === "production" &&
     !isForceDynamic &&
+    (isRscRequest || !_scriptNonce) &&
     revalidateSeconds !== null && revalidateSeconds > 0 && revalidateSeconds !== Infinity
   ) {
     const __cachedPageResponse = await __readAppPageCacheResponse({
@@ -12776,7 +12922,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       return buildPageElement(route, params, interceptOpts, url.searchParams);
     },
     renderErrorBoundaryPage(buildErr) {
-      return renderErrorBoundaryPage(route, buildErr, isRscRequest, request, params);
+      return renderErrorBoundaryPage(route, buildErr, isRscRequest, request, params, _scriptNonce);
     },
     renderSpecialError(__buildSpecialError) {
       return __buildAppPageSpecialErrorResponse({
@@ -12785,9 +12931,16 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           setNavigationContext(null);
         },
         renderFallbackPage(statusCode) {
-          return renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, {
-            matchedParams: params,
-          });
+          return renderHTTPAccessFallbackPage(
+            route,
+            statusCode,
+            isRscRequest,
+            request,
+            {
+              matchedParams: params,
+            },
+            _scriptNonce,
+          );
         },
         requestUrl: request.url,
         specialError: __buildSpecialError,
@@ -12866,7 +13019,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     },
     revalidateSeconds,
     renderErrorBoundaryResponse(renderErr) {
-      return renderErrorBoundaryPage(route, renderErr, isRscRequest, request, params);
+      return renderErrorBoundaryPage(route, renderErr, isRscRequest, request, params, _scriptNonce);
     },
     async renderLayoutSpecialError(__layoutSpecialError, li) {
       return __buildAppPageSpecialErrorResponse({
@@ -12889,11 +13042,18 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           }
           if (!parentNotFound) parentNotFound = null;
           const parentLayouts = route.layouts.slice(0, li);
-          return renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, {
-            boundaryComponent: parentNotFound,
-            layouts: parentLayouts,
-            matchedParams: params,
-          });
+          return renderHTTPAccessFallbackPage(
+            route,
+            statusCode,
+            isRscRequest,
+            request,
+            {
+              boundaryComponent: parentNotFound,
+              layouts: parentLayouts,
+              matchedParams: params,
+            },
+            _scriptNonce,
+          );
         },
         requestUrl: request.url,
         specialError: __layoutSpecialError,
@@ -12906,9 +13066,16 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           setNavigationContext(null);
         },
         renderFallbackPage(statusCode) {
-          return renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, {
-            matchedParams: params,
-          });
+          return renderHTTPAccessFallbackPage(
+            route,
+            statusCode,
+            isRscRequest,
+            request,
+            {
+              matchedParams: params,
+            },
+            _scriptNonce,
+          );
         },
         requestUrl: request.url,
         specialError,
@@ -12923,6 +13090,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       // each have their own ALS store and are unaffected.
       return _suppressHookWarningAls.run(true, probe);
     },
+    scriptNonce: _scriptNonce,
     waitUntil(__cachePromise) {
       _getRequestExecutionContext()?.waitUntil(__cachePromise);
     },
@@ -13062,7 +13230,7 @@ import { runWithServerInsertedHTMLState } from "vinext/navigation-state";
 import { runWithHeadState } from "vinext/head-state";
 import "vinext/i18n-state";
 import { setI18nContext } from "vinext/i18n-context";
-import { safeJsonStringify } from "vinext/html";
+import { createNonceAttribute as __createNonceAttribute, safeJsonStringify } from "vinext/html";
 import { getSSRFontLinks as _getSSRFontLinks, getSSRFontStyles as _getSSRFontStylesGoogle, getSSRFontPreloads as _getSSRFontPreloadsGoogle } from "next/font/google";
 import { getSSRFontStyles as _getSSRFontStylesLocal, getSSRFontPreloads as _getSSRFontPreloadsLocal } from "next/font/local";
 import { sanitizeDestination as sanitizeDestinationLocal } from "<ROOT>/packages/vinext/src/config/config-matchers.js";
@@ -13078,6 +13246,7 @@ import {
   isrCacheKey as __sharedIsrCacheKey,
   triggerBackgroundRegeneration as __sharedTriggerBackgroundRegeneration,
 } from "<ROOT>/packages/vinext/src/server/isr-cache.js";
+import { getScriptNonceFromHeaderSources as __getScriptNonceFromHeaderSources } from "<ROOT>/packages/vinext/src/server/csp.js";
 import { resolvePagesPageData as __resolvePagesPageData } from "<ROOT>/packages/vinext/src/server/pages-page-data.js";
 import { renderPagesPageResponse as __renderPagesPageResponse } from "<ROOT>/packages/vinext/src/server/pages-page-response.js";
 import * as _instrumentation from "<ROOT>/tests/fixtures/pages-basic/instrumentation.ts";
@@ -13281,13 +13450,14 @@ function patternToNextFormat(pattern) {
     .replace(/:([\\w]+)/g, "[$1]");
 }
 
-function collectAssetTags(manifest, moduleIds) {
+function collectAssetTags(manifest, moduleIds, scriptNonce) {
   // Fall back to embedded manifest (set by vinext:cloudflare-build for Workers)
   const m = (manifest && Object.keys(manifest).length > 0)
     ? manifest
     : (typeof globalThis !== "undefined" && globalThis.__VINEXT_SSR_MANIFEST__) || null;
   const tags = [];
   const seen = new Set();
+  const nonceAttr = __createNonceAttribute(scriptNonce);
 
   // Load the set of lazy chunk filenames (only reachable via dynamic imports).
   // These should NOT get <link rel="modulepreload"> or <script type="module">
@@ -13300,8 +13470,8 @@ function collectAssetTags(manifest, moduleIds) {
   if (typeof globalThis !== "undefined" && globalThis.__VINEXT_CLIENT_ENTRY__) {
     const entry = globalThis.__VINEXT_CLIENT_ENTRY__;
     seen.add(entry);
-    tags.push('<link rel="modulepreload" href="/' + entry + '" />');
-    tags.push('<script type="module" src="/' + entry + '" crossorigin></script>');
+    tags.push('<link rel="modulepreload"' + nonceAttr + ' href="/' + entry + '" />');
+    tags.push('<script type="module"' + nonceAttr + ' src="/' + entry + '" crossorigin></script>');
   }
   if (m) {
     // Always inject shared chunks (framework, vinext runtime, entry) and
@@ -13376,13 +13546,13 @@ function collectAssetTags(manifest, moduleIds) {
       if (seen.has(tf)) continue;
       seen.add(tf);
       if (tf.endsWith(".css")) {
-        tags.push('<link rel="stylesheet" href="/' + tf + '" />');
+        tags.push('<link rel="stylesheet"' + nonceAttr + ' href="/' + tf + '" />');
       } else if (tf.endsWith(".js")) {
         // Skip lazy chunks — they are behind dynamic import() boundaries
         // (React.lazy, next/dynamic) and should only be fetched on demand.
         if (lazySet && lazySet.has(tf)) continue;
-        tags.push('<link rel="modulepreload" href="/' + tf + '" />');
-        tags.push('<script type="module" src="/' + tf + '" crossorigin></script>');
+        tags.push('<link rel="modulepreload"' + nonceAttr + ' href="/' + tf + '" />');
+        tags.push('<script type="module"' + nonceAttr + ' src="/' + tf + '" crossorigin></script>');
       }
     }
   }
@@ -13436,12 +13606,12 @@ function parseCookieLocaleFromHeader(cookieHeader) {
   return null;
 }
 
-export async function renderPage(request, url, manifest, ctx) {
-  if (ctx) return _runWithExecutionContext(ctx, () => _renderPage(request, url, manifest));
-  return _renderPage(request, url, manifest);
+export async function renderPage(request, url, manifest, ctx, middlewareHeaders) {
+  if (ctx) return _runWithExecutionContext(ctx, () => _renderPage(request, url, manifest, middlewareHeaders));
+  return _renderPage(request, url, manifest, middlewareHeaders);
 }
 
-async function _renderPage(request, url, manifest) {
+async function _renderPage(request, url, manifest, middlewareHeaders) {
   const localeInfo = i18nConfig
     ? resolvePagesI18nRequest(
         url,
@@ -13469,198 +13639,201 @@ async function _renderPage(request, url, manifest) {
       { status: 404, headers: { "Content-Type": "text/html" } });
   }
 
-	  const { route, params } = match;
-	  const __uCtx = _createUnifiedCtx({
-	    executionContext: _getRequestExecutionContext(),
-	  });
-	  return _runWithUnifiedCtx(__uCtx, async () => {
-	    ensureFetchPatch();
-	    try {
-	    const routePattern = patternToNextFormat(route.pattern);
-	    if (typeof setSSRContext === "function") {
-	      setSSRContext({
-	        pathname: routePattern,
-	        query: { ...params, ...parseQuery(routeUrl) },
-	        asPath: routeUrl,
-	        locale: locale,
-        locales: i18nConfig ? i18nConfig.locales : undefined,
-        defaultLocale: currentDefaultLocale,
-        domainLocales: domainLocales,
-      });
-    }
-
-    if (i18nConfig) {
-      setI18nContext({
-        locale: locale,
-        locales: i18nConfig.locales,
-        defaultLocale: currentDefaultLocale,
-        domainLocales: domainLocales,
-        hostname: new URL(request.url).hostname,
-      });
-    }
-
-    const pageModule = route.module;
-    const PageComponent = pageModule.default;
-	    if (!PageComponent) {
-	      return new Response("Page has no default export", { status: 500 });
-	    }
-	    // Build font Link header early so it's available for ISR cached responses too.
-	    // Font preloads are module-level state populated at import time and persist across requests.
-	    var _fontLinkHeader = "";
-	    var _allFp = [];
+  const { route, params } = match;
+  const __uCtx = _createUnifiedCtx({
+    executionContext: _getRequestExecutionContext(),
+  });
+  return _runWithUnifiedCtx(__uCtx, async () => {
+    ensureFetchPatch();
     try {
-      var _fpGoogle = typeof _getSSRFontPreloadsGoogle === "function" ? _getSSRFontPreloadsGoogle() : [];
-      var _fpLocal = typeof _getSSRFontPreloadsLocal === "function" ? _getSSRFontPreloadsLocal() : [];
-      _allFp = _fpGoogle.concat(_fpLocal);
-	      if (_allFp.length > 0) {
-	        _fontLinkHeader = _allFp.map(function(p) { return "<" + p.href + ">; rel=preload; as=font; type=" + p.type + "; crossorigin"; }).join(", ");
-	      }
-	    } catch (e) { /* font preloads not available */ }
-	    const query = parseQuery(routeUrl);
-	    const pageDataResult = await __resolvePagesPageData({
-	      applyRequestContexts() {
-	        if (typeof setSSRContext === "function") {
-	          setSSRContext({
-	            pathname: routePattern,
-	            query: { ...params, ...query },
-	            asPath: routeUrl,
-	            locale: locale,
-	            locales: i18nConfig ? i18nConfig.locales : undefined,
-	            defaultLocale: currentDefaultLocale,
-	            domainLocales: domainLocales,
-	          });
-	        }
-	        if (i18nConfig) {
-	          setI18nContext({
-	            locale: locale,
-	            locales: i18nConfig.locales,
-	            defaultLocale: currentDefaultLocale,
-	            domainLocales: domainLocales,
-	            hostname: new URL(request.url).hostname,
-	          });
-	        }
-	      },
-	      buildId,
-	      createGsspReqRes() {
-	        return __createPagesReqRes({ body: undefined, query, request, url: routeUrl });
-	      },
-	      createPageElement(currentPageProps) {
-	        var currentElement = AppComponent
-	          ? React.createElement(AppComponent, { Component: PageComponent, pageProps: currentPageProps })
-	          : React.createElement(PageComponent, currentPageProps);
-	        return wrapWithRouterContext(currentElement);
-	      },
-	      fontLinkHeader: _fontLinkHeader,
-	      i18n: {
-	        locale: locale,
-	        locales: i18nConfig ? i18nConfig.locales : undefined,
-	        defaultLocale: currentDefaultLocale,
-	        domainLocales: domainLocales,
-	      },
-	      isrCacheKey,
-	      isrGet,
-	      isrSet,
-	      pageModule,
-	      params,
-	      query,
-	      renderIsrPassToStringAsync,
-	      route: {
-	        isDynamic: route.isDynamic,
-	      },
-	      routePattern,
-	      routeUrl,
-	      runInFreshUnifiedContext(callback) {
-	        var revalCtx = _createUnifiedCtx({
-	          executionContext: _getRequestExecutionContext(),
-	        });
-	        return _runWithUnifiedCtx(revalCtx, async () => {
-	          ensureFetchPatch();
-	          return callback();
-	        });
-	      },
-	      safeJsonStringify,
-	      sanitizeDestination: sanitizeDestinationLocal,
-	      triggerBackgroundRegeneration,
-	    });
-	    if (pageDataResult.kind === "response") {
-	      return pageDataResult.response;
-	    }
-	    let pageProps = pageDataResult.pageProps;
-	    var gsspRes = pageDataResult.gsspRes;
-	    let isrRevalidateSeconds = pageDataResult.isrRevalidateSeconds;
+      const routePattern = patternToNextFormat(route.pattern);
+      if (typeof setSSRContext === "function") {
+        setSSRContext({
+          pathname: routePattern,
+          query: { ...params, ...parseQuery(routeUrl) },
+          asPath: routeUrl,
+          locale: locale,
+          locales: i18nConfig ? i18nConfig.locales : undefined,
+          defaultLocale: currentDefaultLocale,
+          domainLocales: domainLocales,
+        });
+      }
 
-	    const pageModuleIds = route.filePath ? [route.filePath] : [];
-	    const assetTags = collectAssetTags(manifest, pageModuleIds);
+      if (i18nConfig) {
+        setI18nContext({
+          locale: locale,
+          locales: i18nConfig.locales,
+          defaultLocale: currentDefaultLocale,
+          domainLocales: domainLocales,
+          hostname: new URL(request.url).hostname,
+        });
+      }
 
-    return __renderPagesPageResponse({
-      assetTags,
-      buildId,
-      clearSsrContext() {
-        if (typeof setSSRContext === "function") setSSRContext(null);
-      },
-      createPageElement(currentPageProps) {
-        var currentElement;
-        if (AppComponent) {
-          currentElement = React.createElement(AppComponent, { Component: PageComponent, pageProps: currentPageProps });
-        } else {
-          currentElement = React.createElement(PageComponent, currentPageProps);
+      const pageModule = route.module;
+      const PageComponent = pageModule.default;
+      if (!PageComponent) {
+        return new Response("Page has no default export", { status: 500 });
+      }
+      const scriptNonce = __getScriptNonceFromHeaderSources(request.headers, middlewareHeaders);
+      // Build font Link header early so it's available for ISR cached responses too.
+      // Font preloads are module-level state populated at import time and persist across requests.
+      var _fontLinkHeader = "";
+      var _allFp = [];
+      try {
+        var _fpGoogle = typeof _getSSRFontPreloadsGoogle === "function" ? _getSSRFontPreloadsGoogle() : [];
+        var _fpLocal = typeof _getSSRFontPreloadsLocal === "function" ? _getSSRFontPreloadsLocal() : [];
+        _allFp = _fpGoogle.concat(_fpLocal);
+        if (_allFp.length > 0) {
+          _fontLinkHeader = _allFp.map(function(p) { return "<" + p.href + ">; rel=preload; as=font; type=" + p.type + "; crossorigin"; }).join(", ");
         }
-        return wrapWithRouterContext(currentElement);
-      },
-      DocumentComponent,
-      flushPreloads: typeof flushPreloads === "function" ? flushPreloads : undefined,
-      fontLinkHeader: _fontLinkHeader,
-      fontPreloads: _allFp,
-      getFontLinks() {
-        try {
-          return typeof _getSSRFontLinks === "function" ? _getSSRFontLinks() : [];
-        } catch (e) {
-          return [];
-        }
-      },
-      getFontStyles() {
-        try {
-          var allFontStyles = [];
-          if (typeof _getSSRFontStylesGoogle === "function") allFontStyles.push(..._getSSRFontStylesGoogle());
-          if (typeof _getSSRFontStylesLocal === "function") allFontStyles.push(..._getSSRFontStylesLocal());
-          return allFontStyles;
-        } catch (e) {
-          return [];
-        }
-      },
-	      getSSRHeadHTML: typeof getSSRHeadHTML === "function" ? getSSRHeadHTML : undefined,
-	      gsspRes,
-      isrCacheKey,
-      isrRevalidateSeconds,
-      isrSet,
-      i18n: {
-        locale: locale,
-        locales: i18nConfig ? i18nConfig.locales : undefined,
-        defaultLocale: currentDefaultLocale,
-        domainLocales: domainLocales,
-      },
-      pageProps,
-      params,
-      renderDocumentToString(element) {
-        return renderToStringAsync(element);
-      },
-      renderIsrPassToStringAsync,
-      renderToReadableStream(element) {
-        return renderToReadableStream(element);
-      },
-      resetSSRHead: typeof resetSSRHead === "function" ? resetSSRHead : undefined,
-	      routePattern,
-      routeUrl,
-      safeJsonStringify,
-    });
+      } catch (e) { /* font preloads not available */ }
+      const query = parseQuery(routeUrl);
+      const pageDataResult = await __resolvePagesPageData({
+        applyRequestContexts() {
+          if (typeof setSSRContext === "function") {
+            setSSRContext({
+              pathname: routePattern,
+              query: { ...params, ...query },
+              asPath: routeUrl,
+              locale: locale,
+              locales: i18nConfig ? i18nConfig.locales : undefined,
+              defaultLocale: currentDefaultLocale,
+              domainLocales: domainLocales,
+            });
+          }
+          if (i18nConfig) {
+            setI18nContext({
+              locale: locale,
+              locales: i18nConfig.locales,
+              defaultLocale: currentDefaultLocale,
+              domainLocales: domainLocales,
+              hostname: new URL(request.url).hostname,
+            });
+          }
+        },
+        buildId,
+        createGsspReqRes() {
+          return __createPagesReqRes({ body: undefined, query, request, url: routeUrl });
+        },
+        createPageElement(currentPageProps) {
+          var currentElement = AppComponent
+            ? React.createElement(AppComponent, { Component: PageComponent, pageProps: currentPageProps })
+            : React.createElement(PageComponent, currentPageProps);
+          return wrapWithRouterContext(currentElement);
+        },
+        fontLinkHeader: _fontLinkHeader,
+        i18n: {
+          locale: locale,
+          locales: i18nConfig ? i18nConfig.locales : undefined,
+          defaultLocale: currentDefaultLocale,
+          domainLocales: domainLocales,
+        },
+        isrCacheKey,
+        isrGet,
+        isrSet,
+        pageModule,
+        params,
+        query,
+        renderIsrPassToStringAsync,
+        route: {
+          isDynamic: route.isDynamic,
+        },
+        routePattern,
+        routeUrl,
+        runInFreshUnifiedContext(callback) {
+          var revalCtx = _createUnifiedCtx({
+            executionContext: _getRequestExecutionContext(),
+          });
+          return _runWithUnifiedCtx(revalCtx, async () => {
+            ensureFetchPatch();
+            return callback();
+          });
+        },
+        safeJsonStringify,
+        sanitizeDestination: sanitizeDestinationLocal,
+        scriptNonce,
+        triggerBackgroundRegeneration,
+      });
+      if (pageDataResult.kind === "response") {
+        return pageDataResult.response;
+      }
+      let pageProps = pageDataResult.pageProps;
+      var gsspRes = pageDataResult.gsspRes;
+      let isrRevalidateSeconds = pageDataResult.isrRevalidateSeconds;
+
+      const pageModuleIds = route.filePath ? [route.filePath] : [];
+      const assetTags = collectAssetTags(manifest, pageModuleIds, scriptNonce);
+
+      return __renderPagesPageResponse({
+        assetTags,
+        buildId,
+        clearSsrContext() {
+          if (typeof setSSRContext === "function") setSSRContext(null);
+        },
+        createPageElement(currentPageProps) {
+          var currentElement;
+          if (AppComponent) {
+            currentElement = React.createElement(AppComponent, { Component: PageComponent, pageProps: currentPageProps });
+          } else {
+            currentElement = React.createElement(PageComponent, currentPageProps);
+          }
+          return wrapWithRouterContext(currentElement);
+        },
+        DocumentComponent,
+        flushPreloads: typeof flushPreloads === "function" ? flushPreloads : undefined,
+        fontLinkHeader: _fontLinkHeader,
+        fontPreloads: _allFp,
+        getFontLinks() {
+          try {
+            return typeof _getSSRFontLinks === "function" ? _getSSRFontLinks() : [];
+          } catch (e) {
+            return [];
+          }
+        },
+        getFontStyles() {
+          try {
+            var allFontStyles = [];
+            if (typeof _getSSRFontStylesGoogle === "function") allFontStyles.push(..._getSSRFontStylesGoogle());
+            if (typeof _getSSRFontStylesLocal === "function") allFontStyles.push(..._getSSRFontStylesLocal());
+            return allFontStyles;
+          } catch (e) {
+            return [];
+          }
+        },
+        getSSRHeadHTML: typeof getSSRHeadHTML === "function" ? getSSRHeadHTML : undefined,
+        gsspRes,
+        isrCacheKey,
+        isrRevalidateSeconds,
+        isrSet,
+        i18n: {
+          locale: locale,
+          locales: i18nConfig ? i18nConfig.locales : undefined,
+          defaultLocale: currentDefaultLocale,
+          domainLocales: domainLocales,
+        },
+        pageProps,
+        params,
+        renderDocumentToString(element) {
+          return renderToStringAsync(element);
+        },
+        renderIsrPassToStringAsync,
+        renderToReadableStream(element) {
+          return renderToReadableStream(element);
+        },
+        resetSSRHead: typeof resetSSRHead === "function" ? resetSSRHead : undefined,
+        routePattern,
+        routeUrl,
+        safeJsonStringify,
+        scriptNonce,
+      });
     } catch (e) {
-    console.error("[vinext] SSR error:", e);
-    _reportRequestError(
-      e instanceof Error ? e : new Error(String(e)),
-      { path: url, method: request.method, headers: Object.fromEntries(request.headers.entries()) },
-      { routerKind: "Pages Router", routePath: route.pattern, routeType: "render" },
-    ).catch(() => { /* ignore reporting errors */ });
-    return new Response("Internal Server Error", { status: 500 });
+      console.error("[vinext] SSR error:", e);
+      _reportRequestError(
+        e instanceof Error ? e : new Error(String(e)),
+        { path: url, method: request.method, headers: Object.fromEntries(request.headers.entries()) },
+        { routerKind: "Pages Router", routePath: route.pattern, routeType: "render" },
+      ).catch(() => { /* ignore reporting errors */ });
+      return new Response("Internal Server Error", { status: 500 });
     }
   });
 }

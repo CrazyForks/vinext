@@ -61,6 +61,7 @@ const appPageRouteWiringPath = resolveEntryPath(
 );
 const appPageRenderPath = resolveEntryPath("../server/app-page-render.js", import.meta.url);
 const appPageResponsePath = resolveEntryPath("../server/app-page-response.js", import.meta.url);
+const cspPath = resolveEntryPath("../server/csp.js", import.meta.url);
 const appPageRequestPath = resolveEntryPath("../server/app-page-request.js", import.meta.url);
 const appRouteHandlerResponsePath = resolveEntryPath(
   "../server/app-route-handler-response.js",
@@ -394,6 +395,7 @@ import {
 import {
   mergeMiddlewareResponseHeaders as __mergeMiddlewareResponseHeaders,
 } from ${JSON.stringify(appPageResponsePath)};
+import { getScriptNonceFromHeaderSources as __getScriptNonceFromHeaderSources } from ${JSON.stringify(cspPath)};
 import {
   buildAppPageElement as __buildAppPageElement,
   resolveAppPageIntercept as __resolveAppPageIntercept,
@@ -737,7 +739,7 @@ const rootLayouts = [${rootLayoutVars.join(", ")}];
  * @param opts.boundaryComponent - Override the boundary component (for layout-level notFound)
  * @param opts.layouts - Override the layouts to wrap with (for layout-level notFound, excludes the throwing layout)
  */
-async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, opts) {
+async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, opts, scriptNonce) {
   return __renderAppPageHttpAccessFallback({
     boundaryComponent: opts?.boundaryComponent ?? null,
     buildFontLinkHeader: __buildAppPageFontLinkHeader,
@@ -768,13 +770,14 @@ async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, req
     rootUnauthorizedModule: rootUnauthorizedModule,
     route,
     renderToReadableStream,
+    scriptNonce,
     statusCode,
   });
 }
 
 /** Convenience: render a not-found page (404) */
-async function renderNotFoundPage(route, isRscRequest, request, matchedParams) {
-  return renderHTTPAccessFallbackPage(route, 404, isRscRequest, request, { matchedParams });
+async function renderNotFoundPage(route, isRscRequest, request, matchedParams, scriptNonce) {
+  return renderHTTPAccessFallbackPage(route, 404, isRscRequest, request, { matchedParams }, scriptNonce);
 }
 
 /**
@@ -784,7 +787,7 @@ async function renderNotFoundPage(route, isRscRequest, request, matchedParams) {
  * Next.js returns HTTP 200 when error.tsx catches an error (the error is "handled"
  * by the boundary). This matches that behavior intentionally.
  */
-async function renderErrorBoundaryPage(route, error, isRscRequest, request, matchedParams) {
+async function renderErrorBoundaryPage(route, error, isRscRequest, request, matchedParams, scriptNonce) {
   return __renderAppPageErrorBoundary({
     buildFontLinkHeader: __buildAppPageFontLinkHeader,
     clearRequestContext() {
@@ -812,6 +815,7 @@ async function renderErrorBoundaryPage(route, error, isRscRequest, request, matc
     route,
     renderToReadableStream,
     sanitizeErrorForClient: __sanitizeErrorForClient,
+    scriptNonce,
   });
 }
 
@@ -1503,6 +1507,8 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       : ""
   }
 
+  const _scriptNonce = __getScriptNonceFromHeaderSources(request.headers, _mwCtx.headers);
+
   // Build post-middleware request context for afterFiles/fallback rewrites.
   // These run after middleware in the App Router execution order and should
   // evaluate has/missing conditions against middleware-modified headers.
@@ -1868,7 +1874,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         : ""
     }
     // Render custom not-found page if available, otherwise plain 404
-    const notFoundResponse = await renderNotFoundPage(null, isRscRequest, request);
+    const notFoundResponse = await renderNotFoundPage(null, isRscRequest, request, undefined, _scriptNonce);
     if (notFoundResponse) return notFoundResponse;
     setHeadersContext(null);
     setNavigationContext(null);
@@ -2081,6 +2087,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   if (
     process.env.NODE_ENV === "production" &&
     !isForceDynamic &&
+    (isRscRequest || !_scriptNonce) &&
     revalidateSeconds !== null && revalidateSeconds > 0 && revalidateSeconds !== Infinity
   ) {
     const __cachedPageResponse = await __readAppPageCacheResponse({
@@ -2236,7 +2243,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       return buildPageElement(route, params, interceptOpts, url.searchParams);
     },
     renderErrorBoundaryPage(buildErr) {
-      return renderErrorBoundaryPage(route, buildErr, isRscRequest, request, params);
+      return renderErrorBoundaryPage(route, buildErr, isRscRequest, request, params, _scriptNonce);
     },
     renderSpecialError(__buildSpecialError) {
       return __buildAppPageSpecialErrorResponse({
@@ -2245,9 +2252,16 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           setNavigationContext(null);
         },
         renderFallbackPage(statusCode) {
-          return renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, {
-            matchedParams: params,
-          });
+          return renderHTTPAccessFallbackPage(
+            route,
+            statusCode,
+            isRscRequest,
+            request,
+            {
+              matchedParams: params,
+            },
+            _scriptNonce,
+          );
         },
         requestUrl: request.url,
         specialError: __buildSpecialError,
@@ -2326,7 +2340,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     },
     revalidateSeconds,
     renderErrorBoundaryResponse(renderErr) {
-      return renderErrorBoundaryPage(route, renderErr, isRscRequest, request, params);
+      return renderErrorBoundaryPage(route, renderErr, isRscRequest, request, params, _scriptNonce);
     },
     async renderLayoutSpecialError(__layoutSpecialError, li) {
       return __buildAppPageSpecialErrorResponse({
@@ -2349,11 +2363,18 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           }
           if (!parentNotFound) parentNotFound = ${rootNotFoundVar ? `${rootNotFoundVar}?.default` : "null"};
           const parentLayouts = route.layouts.slice(0, li);
-          return renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, {
-            boundaryComponent: parentNotFound,
-            layouts: parentLayouts,
-            matchedParams: params,
-          });
+          return renderHTTPAccessFallbackPage(
+            route,
+            statusCode,
+            isRscRequest,
+            request,
+            {
+              boundaryComponent: parentNotFound,
+              layouts: parentLayouts,
+              matchedParams: params,
+            },
+            _scriptNonce,
+          );
         },
         requestUrl: request.url,
         specialError: __layoutSpecialError,
@@ -2366,9 +2387,16 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           setNavigationContext(null);
         },
         renderFallbackPage(statusCode) {
-          return renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, request, {
-            matchedParams: params,
-          });
+          return renderHTTPAccessFallbackPage(
+            route,
+            statusCode,
+            isRscRequest,
+            request,
+            {
+              matchedParams: params,
+            },
+            _scriptNonce,
+          );
         },
         requestUrl: request.url,
         specialError,
@@ -2383,6 +2411,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       // each have their own ALS store and are unaffected.
       return _suppressHookWarningAls.run(true, probe);
     },
+    scriptNonce: _scriptNonce,
     waitUntil(__cachePromise) {
       _getRequestExecutionContext()?.waitUntil(__cachePromise);
     },

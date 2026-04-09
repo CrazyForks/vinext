@@ -90,6 +90,7 @@ export type RenderAppPageLifecycleOptions = {
   routeHasLocalBoundary: boolean;
   routePattern: string;
   runWithSuppressedHookWarning<T>(probe: () => Promise<T>): Promise<T>;
+  scriptNonce?: string;
   waitUntil?: (promise: Promise<void>) => void;
   element: ReactNode;
 };
@@ -224,6 +225,7 @@ export async function renderAppPageLifecycle(
         fontData,
         navigationContext: options.getNavigationContext(),
         rscStream: rscForResponse,
+        scriptNonce: options.scriptNonce,
         ssrHandler,
       });
     },
@@ -274,6 +276,7 @@ export async function renderAppPageLifecycle(
 
   const htmlResponsePolicy = resolveAppPageHtmlResponsePolicy({
     dynamicUsedDuringRender,
+    hasScriptNonce: Boolean(options.scriptNonce),
     isDynamicError: options.isDynamicError,
     isForceDynamic: options.isForceDynamic,
     isForceStatic: options.isForceStatic,

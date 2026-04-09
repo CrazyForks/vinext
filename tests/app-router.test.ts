@@ -1676,6 +1676,27 @@ describe("App Router Production server (startProdServer)", () => {
     expect(html).toContain("<script");
   });
 
+  it("does not reuse cached HTML across requests with different CSP nonces", async () => {
+    const firstRes = await fetch(`${baseUrl}/revalidate-test?csp-nonce=first`);
+    expect(firstRes.status).toBe(200);
+    expect(firstRes.headers.get("cache-control")).toBe("no-store, must-revalidate");
+    expect(firstRes.headers.get("content-security-policy")).toBe(
+      "script-src 'nonce-first' 'strict-dynamic';",
+    );
+    const firstHtml = await firstRes.text();
+    expect(firstHtml).toContain('<script nonce="first">self.__VINEXT_RSC_PARAMS__={}</script>');
+
+    const secondRes = await fetch(`${baseUrl}/revalidate-test?csp-nonce=second`);
+    expect(secondRes.status).toBe(200);
+    expect(secondRes.headers.get("cache-control")).toBe("no-store, must-revalidate");
+    expect(secondRes.headers.get("content-security-policy")).toBe(
+      "script-src 'nonce-second' 'strict-dynamic';",
+    );
+    const secondHtml = await secondRes.text();
+    expect(secondHtml).toContain('<script nonce="second">self.__VINEXT_RSC_PARAMS__={}</script>');
+    expect(secondHtml).not.toContain('nonce="first"');
+  });
+
   it("does not collapse encoded slashes onto nested routes in production", async () => {
     const encodedRes = await fetch(`${baseUrl}/headers%2Foverride-from-middleware`);
     expect(encodedRes.status).toBe(404);
@@ -4010,6 +4031,9 @@ describe("generateRscEntry ISR code generation", () => {
     const code = generateRscEntry("/tmp/test/app", minimalRoutes);
     expect(code).toContain("renderAppPageErrorBoundary as __renderAppPageErrorBoundary");
     expect(code).toContain("renderAppPageHttpAccessFallback as __renderAppPageHttpAccessFallback");
+    expect(code).toContain(
+      "const _scriptNonce = __getScriptNonceFromHeaderSources(request.headers, _mwCtx.headers);",
+    );
     expect(code).toContain("return __renderAppPageHttpAccessFallback({");
     expect(code).toContain("return __renderAppPageErrorBoundary({");
   });
