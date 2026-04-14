@@ -1,4 +1,5 @@
 import { Fragment, createElement, type ComponentType, type ReactNode } from "react";
+import { buildClientHookErrorMessage } from "../shims/client-hook-error.js";
 import { ErrorBoundary } from "../shims/error-boundary.js";
 import { LayoutSegmentProvider } from "../shims/layout-segment-context.js";
 import {
@@ -367,6 +368,7 @@ export async function renderAppPageErrorBoundary<TModule extends AppPageModule>(
 
   const rawError =
     options.error instanceof Error ? options.error : new Error(String(options.error));
+  rewriteClientHookError(rawError);
   const errorObject = options.sanitizeErrorForClient(rawError);
   const matchedParams = options.matchedParams ?? options.route?.params ?? {};
   const layoutModules = options.route?.layouts ?? options.rootLayouts;
@@ -395,4 +397,18 @@ export async function renderAppPageErrorBoundary<TModule extends AppPageModule>(
     routePattern: options.route?.pattern,
     status: 200,
   });
+}
+
+// React client-only hooks that are absent from the `react-server` export
+// condition. When called in a Server Component they produce a TypeError like
+// "useState is not a function". Rewrite into an actionable message matching
+// the format used by the next/navigation shims (see client-hook-error.ts).
+const _clientHookPattern =
+  /\b(useState|useEffect|useReducer|useRef|useContext|useLayoutEffect|useInsertionEffect|useSyncExternalStore|useTransition|useImperativeHandle|useDeferredValue|useActionState|useOptimistic|useEffectEvent)\b.*is not a function/;
+
+function rewriteClientHookError(error: Error): void {
+  const match = error.message.match(_clientHookPattern);
+  if (match) {
+    error.message = buildClientHookErrorMessage(`${match[1]}()`);
+  }
 }
