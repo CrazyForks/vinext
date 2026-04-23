@@ -31,6 +31,8 @@ export type InterceptingRoute = {
   targetPattern: string;
   /** Absolute path to the intercepting page component */
   pagePath: string;
+  /** Absolute layout paths inside the intercepting route tree, outermost to innermost */
+  layoutPaths: string[];
   /** Parameter names for dynamic segments */
   params: string[];
 };
@@ -906,7 +908,13 @@ function collectInterceptingPages(
   appDir: string,
   results: InterceptingRoute[],
   matcher: ValidFileMatcher,
+  parentLayoutPaths: readonly string[] = [],
 ): void {
+  const currentLayoutPath = findFile(currentDir, "layout", matcher);
+  const layoutPaths = currentLayoutPath
+    ? [...parentLayoutPaths, currentLayoutPath]
+    : parentLayoutPaths;
+
   // Check for page.tsx in current directory
   const page = findFile(currentDir, "page", matcher);
   if (page) {
@@ -921,6 +929,7 @@ function collectInterceptingPages(
     if (targetPattern) {
       results.push({
         convention,
+        layoutPaths: [...layoutPaths],
         targetPattern: targetPattern.pattern,
         pagePath: page,
         params: targetPattern.params,
@@ -944,6 +953,7 @@ function collectInterceptingPages(
       appDir,
       results,
       matcher,
+      layoutPaths,
     );
   }
 }

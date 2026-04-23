@@ -74,6 +74,7 @@ export type AppPageRouteWiringRoute<
 };
 
 export type AppPageSlotOverride<TModule extends AppPageModule = AppPageModule> = {
+  layoutModules?: readonly (TModule | null | undefined)[] | null;
   pageModule: TModule;
   params?: AppPageParams;
   props?: Readonly<Record<string, unknown>>;
@@ -483,8 +484,9 @@ export function buildAppPageElements<
       continue;
     }
 
+    const slotThenableParams = options.makeThenableParams(slotParams);
     const slotProps: Record<string, unknown> = {
-      params: options.makeThenableParams(slotParams),
+      params: slotThenableParams,
     };
     if (slotOverride?.props) {
       Object.assign(slotProps, slotOverride.props);
@@ -492,14 +494,26 @@ export function buildAppPageElements<
 
     const SlotComponent = slotComponent;
     let slotElement: ReactNode = <SlotComponent {...slotProps} />;
+    const interceptLayouts = slotOverride?.layoutModules ?? [];
+
+    for (let layoutIndex = interceptLayouts.length - 1; layoutIndex >= 0; layoutIndex--) {
+      const interceptLayoutComponent = getDefaultExport(interceptLayouts[layoutIndex]);
+      if (!interceptLayoutComponent) {
+        continue;
+      }
+      const InterceptLayoutComponent = interceptLayoutComponent;
+      slotElement = (
+        <InterceptLayoutComponent params={slotThenableParams}>
+          {slotElement}
+        </InterceptLayoutComponent>
+      );
+    }
 
     const slotLayoutComponent = getDefaultExport(slot.layout);
     if (slotLayoutComponent) {
       const SlotLayoutComponent = slotLayoutComponent;
       slotElement = (
-        <SlotLayoutComponent params={options.makeThenableParams(slotParams)}>
-          {slotElement}
-        </SlotLayoutComponent>
+        <SlotLayoutComponent params={slotThenableParams}>{slotElement}</SlotLayoutComponent>
       );
     }
 
