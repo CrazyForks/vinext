@@ -25,6 +25,18 @@ export async function middleware(request: NextRequest, event: NextFetchEvent) {
 
   // Test NextRequest.cookies - this would fail with TypeError if request is plain Request
   const sessionToken = request.cookies.get("session");
+  const acceptsRsc = request.headers.get("accept")?.startsWith("text/x-component") ?? false;
+
+  if (acceptsRsc && pathname === "/rsc-fetch-redirect-src") {
+    return NextResponse.redirect(new URL("/rsc-fetch-error-target.rsc", request.url), 307);
+  }
+
+  if (acceptsRsc && pathname === "/rsc-fetch-error-target") {
+    return new Response("<html><body><h1>Internal Server Error</h1></body></html>", {
+      status: 500,
+      headers: { "content-type": "text/html" },
+    });
+  }
 
   const response = NextResponse.next();
 
@@ -254,6 +266,8 @@ export const config = {
     "/pages-script-manual-nonce",
     "/nextjs-compat/dynamic/:path*",
     "/use-client-page-pathname/:path*",
+    "/rsc-fetch-redirect-src",
+    "/rsc-fetch-error-target",
     "/",
     "/mw-gated-before",
     "/mw-gated-fallback",

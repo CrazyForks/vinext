@@ -56,7 +56,7 @@ test.describe("RSC fetch non-ok response handling", () => {
       }
     });
 
-    await page.goto(`${BASE}/about`);
+    await page.goto(`${BASE}/`);
     await waitForAppRouterHydration(page);
 
     // Trigger RSC navigation to a route that does not exist (returns 404 HTML).
@@ -64,10 +64,7 @@ test.describe("RSC fetch non-ok response handling", () => {
     const navigationPromise = page.waitForURL(`${BASE}/this-route-does-not-exist`, {
       timeout: 10_000,
     });
-    await page.evaluate(() => {
-      void (window as any).__VINEXT_RSC_NAVIGATE__("/this-route-does-not-exist");
-    });
-    await navigationPromise;
+    await Promise.all([navigationPromise, page.getByTestId("missing-route-link").click()]);
 
     // The browser must land on the non-.rsc URL — never on the .rsc variant.
     expect(page.url()).toBe(`${BASE}/this-route-does-not-exist`);
@@ -111,10 +108,7 @@ test.describe("RSC fetch non-ok response handling", () => {
     await waitForAppRouterHydration(page);
 
     const navigationPromise = page.waitForURL(`${BASE}/about`, { timeout: 10_000 });
-    await page.evaluate(() => {
-      void (window as any).__VINEXT_RSC_NAVIGATE__("/about");
-    });
-    await navigationPromise;
+    await Promise.all([navigationPromise, page.locator('a[href="/about"]').click()]);
 
     expect(page.url()).toBe(`${BASE}/about`);
 
@@ -156,23 +150,15 @@ test.describe("RSC fetch non-ok response handling", () => {
   test("redirect chain to a non-ok endpoint hard-navs to the post-redirect URL", async ({
     page,
   }) => {
-    // Chain: client nav to /redirect-test → fetch /redirect-test.rsc →
-    // 307 Location /about.rsc → 500. The hard-nav target must be /about
-    // (the post-redirect URL), not /redirect-test (the original request).
+    // Chain: client nav to /rsc-fetch-redirect-src →
+    // fetch /rsc-fetch-redirect-src.rsc → 307 Location
+    // /rsc-fetch-error-target.rsc → 500. The hard-nav target must be
+    // /rsc-fetch-error-target (the post-redirect URL), not
+    // /rsc-fetch-redirect-src (the original request).
     // Without the navResponseUrl ?? navResponse.url branch in the nav-site
-    // guard, the browser would bounce off /redirect-test and the server
+    // guard, the browser would bounce off /rsc-fetch-redirect-src and the server
     // would re-issue the 307, flashing the wrong URL in the address bar
     // and mis-keying analytics.
-    let aboutRscHits = 0;
-    await page.route(/\/about\.rsc(\?|$)/, (route) => {
-      aboutRscHits += 1;
-      return route.fulfill({
-        status: 500,
-        contentType: "text/html",
-        body: "<html><body><h1>Internal Server Error</h1></body></html>",
-      });
-    });
-
     const consoleErrors: string[] = [];
     page.on("console", (msg) => {
       if (msg.type() === "error") {
@@ -181,9 +167,8 @@ test.describe("RSC fetch non-ok response handling", () => {
     });
 
     // Capture the document URL at every main-frame navigation so we can
-    // assert the address bar never flashes /redirect-src en route to /about.
-    // Without this, a regression that dropped `navResponseUrl ?? navResponse.url`
-    // would still pass because the server's 307 converges to /about eventually.
+    // assert the address bar never flashes the redirect source en route to
+    // the post-redirect target.
     const frameUrls: string[] = [];
     page.on("framenavigated", (frame) => {
       if (frame === page.mainFrame()) frameUrls.push(frame.url());
@@ -192,15 +177,31 @@ test.describe("RSC fetch non-ok response handling", () => {
     await page.goto(`${BASE}/`);
     await waitForAppRouterHydration(page);
 
-    const navigationPromise = page.waitForURL(`${BASE}/about`, { timeout: 10_000 });
-    await page.evaluate(() => {
-      void (window as any).__VINEXT_RSC_NAVIGATE__("/redirect-test");
+    const sourceRedirectPromise = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/rsc-fetch-redirect-src.rsc" &&
+        response.status() === 307,
+      { timeout: 10_000 },
+    );
+    const targetErrorPromise = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/rsc-fetch-error-target.rsc" &&
+        response.status() === 500,
+      { timeout: 10_000 },
+    );
+    const navigationPromise = page.waitForURL(`${BASE}/rsc-fetch-error-target`, {
+      timeout: 10_000,
     });
-    await navigationPromise;
+    await Promise.all([
+      sourceRedirectPromise,
+      targetErrorPromise,
+      navigationPromise,
+      page.getByTestId("rsc-fetch-redirect-src-link").click(),
+    ]);
 
-    expect(page.url()).toBe(`${BASE}/about`);
-    expect(frameUrls.some((url) => url.includes("/redirect-test"))).toBe(false);
-    expect(aboutRscHits).toBeGreaterThanOrEqual(1);
+    expect(page.url()).toBe(`${BASE}/rsc-fetch-error-target`);
+    await expect(page.getByRole("heading", { name: "RSC fetch error target" })).toBeVisible();
+    expect(frameUrls.some((url) => url.includes("/rsc-fetch-redirect-src"))).toBe(false);
 
     const rscParseError = consoleErrors.find((msg) => isRscStreamParseError(msg));
     expect(rscParseError).toBeUndefined();
