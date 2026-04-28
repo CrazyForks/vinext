@@ -789,8 +789,38 @@ function restoreHydrationNavigationContext(
   });
 }
 
+function decodeHashFragment(fragment: string): string {
+  try {
+    return decodeURIComponent(fragment);
+  } catch {
+    return fragment;
+  }
+}
+
+function scrollToHashTarget(hash: string): void {
+  const fragment = decodeHashFragment(hash.startsWith("#") ? hash.slice(1) : hash);
+
+  requestAnimationFrame(() => {
+    if (fragment === "" || fragment === "top") {
+      window.scrollTo(0, 0);
+      return;
+    }
+
+    const idElement = document.getElementById(fragment);
+    if (idElement) {
+      idElement.scrollIntoView({ behavior: "auto" });
+      return;
+    }
+
+    document.getElementsByName(fragment)[0]?.scrollIntoView({ behavior: "auto" });
+  });
+}
+
 function restorePopstateScrollPosition(state: unknown): void {
   if (!(state && typeof state === "object" && "__vinext_scrollY" in state)) {
+    if (window.location.hash) {
+      scrollToHashTarget(window.location.hash);
+    }
     return;
   }
 
