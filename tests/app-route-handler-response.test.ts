@@ -210,6 +210,35 @@ describe("app route handler response helpers", () => {
     await expect(result.text()).resolves.toBe("");
   });
 
+  it("uses mutable cookies as fallbacks and keeps returned response cookies final", async () => {
+    // Matches Next.js appendMutableCookies:
+    // packages/next/src/server/web/spec-extension/adapters/request-cookies.ts
+    // https://github.com/vercel/next.js/blob/canary/packages/next/src/server/web/spec-extension/adapters/request-cookies.ts
+    const response = new Response("body", {
+      headers: [
+        ["Set-Cookie", "session=returned; Path=/; HttpOnly"],
+        ["Set-Cookie", "response-only=1; Path=/"],
+      ],
+    });
+
+    const result = finalizeRouteHandlerResponse(response, {
+      pendingCookies: [
+        "session=mutable; Path=/",
+        "mutable-only=first; Path=/",
+        "mutable-only=final; Path=/; Secure",
+      ],
+      draftCookie: null,
+      isHead: false,
+    });
+
+    expect(result.headers.getSetCookie()).toEqual([
+      "mutable-only=final; Path=/; Secure",
+      "session=returned; Path=/; HttpOnly",
+      "response-only=1; Path=/",
+    ]);
+    await expect(result.text()).resolves.toBe("body");
+  });
+
   it("applies revalidate and MISS headers separately", () => {
     const response = new Response("hello");
 

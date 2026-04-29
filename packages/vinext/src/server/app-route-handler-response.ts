@@ -113,6 +113,54 @@ export function markRouteHandlerCacheMiss(response: Response): void {
   response.headers.set("X-Vinext-Cache", "MISS");
 }
 
+function getSetCookieName(cookie: string): string | null {
+  const equalsIndex = cookie.indexOf("=");
+  if (equalsIndex <= 0) {
+    return null;
+  }
+  return cookie.slice(0, equalsIndex);
+}
+
+function applyMutableCookieFallbacks(headers: Headers, pendingCookies: string[]): void {
+  if (pendingCookies.length === 0) {
+    return;
+  }
+
+  const returnedCookies = headers.getSetCookie();
+  const returnedCookieNames = new Set<string>();
+  for (const cookie of returnedCookies) {
+    const name = getSetCookieName(cookie);
+    if (name) {
+      returnedCookieNames.add(name);
+    }
+  }
+
+  const fallbackCookies = new Map<string, string>();
+  const unkeyedFallbackCookies: string[] = [];
+  for (const cookie of pendingCookies) {
+    const name = getSetCookieName(cookie);
+    if (!name) {
+      unkeyedFallbackCookies.push(cookie);
+      continue;
+    }
+
+    if (!returnedCookieNames.has(name)) {
+      fallbackCookies.set(name, cookie);
+    }
+  }
+
+  headers.delete("Set-Cookie");
+  for (const cookie of unkeyedFallbackCookies) {
+    headers.append("Set-Cookie", cookie);
+  }
+  for (const cookie of fallbackCookies.values()) {
+    headers.append("Set-Cookie", cookie);
+  }
+  for (const cookie of returnedCookies) {
+    headers.append("Set-Cookie", cookie);
+  }
+}
+
 export async function buildAppRouteCacheValue(response: Response): Promise<CachedRouteValue> {
   const body = await response.arrayBuffer();
   const headers: CachedRouteValue["headers"] = {};
@@ -144,9 +192,7 @@ export function finalizeRouteHandlerResponse(
   }
 
   const headers = new Headers(response.headers);
-  for (const cookie of pendingCookies) {
-    headers.append("Set-Cookie", cookie);
-  }
+  applyMutableCookieFallbacks(headers, pendingCookies);
   if (draftCookie) {
     headers.append("Set-Cookie", draftCookie);
   }
