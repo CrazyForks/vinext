@@ -568,6 +568,63 @@ export class RequestCookies {
   }
 }
 
+// Keep this error message in sync with headers.ts. This adapter backs
+// NextRequest cookies, while headers.ts owns the next/headers cookies object.
+class ReadonlyRequestCookiesError extends Error {
+  constructor() {
+    super(
+      "Cookies can only be modified in a Server Action or Route Handler. Read more: https://nextjs.org/docs/app/api-reference/functions/cookies#options",
+    );
+  }
+
+  static callable(this: void): never {
+    throw new ReadonlyRequestCookiesError();
+  }
+}
+
+const REQUEST_HEADERS_MUTATING_METHODS = new Set(["set", "delete", "append"]);
+
+// Keep this error message in sync with headers.ts. This adapter backs
+// NextRequest headers in force-static route handlers, while headers.ts owns the
+// next/headers object.
+class ReadonlyRequestHeadersError extends Error {
+  constructor() {
+    super(
+      "Headers cannot be modified. Read more: https://nextjs.org/docs/app/api-reference/functions/headers",
+    );
+  }
+
+  static callable(this: void): never {
+    throw new ReadonlyRequestHeadersError();
+  }
+}
+
+export function sealRequestHeaders(headers: Headers): Headers {
+  return new Proxy<Headers>(headers, {
+    get(target, prop) {
+      if (typeof prop === "string" && REQUEST_HEADERS_MUTATING_METHODS.has(prop)) {
+        return ReadonlyRequestHeadersError.callable;
+      }
+
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+export function sealRequestCookies(cookies: RequestCookies): RequestCookies {
+  return new Proxy<RequestCookies>(cookies, {
+    get(target, prop) {
+      if (prop === "set" || prop === "delete" || prop === "clear") {
+        return ReadonlyRequestCookiesError.callable;
+      }
+
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
 /**
  * RFC 6265 §4.1.1: cookie-name is a token (RFC 2616 §2.2).
  * Allowed: any visible ASCII (0x21-0x7E) except separators: ()<>@,;:\"/[]?={}

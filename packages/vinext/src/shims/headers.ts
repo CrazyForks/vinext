@@ -25,6 +25,7 @@ export type HeadersContext = {
   headers: Headers;
   cookies: Map<string, string>;
   accessError?: Error;
+  forceStatic?: boolean;
   mutableCookies?: RequestCookies;
   readonlyCookies?: RequestCookies;
   readonlyHeaders?: Headers;
@@ -162,7 +163,11 @@ function _getState(): VinextHeadersShimState {
  * Called by connection(), cookies(), headers(), and noStore().
  */
 export function markDynamicUsage(): void {
-  _getState().dynamicUsageDetected = true;
+  const state = _getState();
+  if (state.headersContext?.forceStatic) {
+    return;
+  }
+  state.dynamicUsageDetected = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -381,6 +386,9 @@ class ReadonlyHeadersError extends Error {
   }
 }
 
+// Keep this error message in sync with server.ts. The two RequestCookies
+// adapters are separate until the next/headers and NextRequest cookie paths
+// share one implementation.
 class ReadonlyRequestCookiesError extends Error {
   constructor() {
     super(

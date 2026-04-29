@@ -73,6 +73,10 @@ const appPageResponsePath = resolveEntryPath("../server/app-page-response.js", i
 const cspPath = resolveEntryPath("../server/csp.js", import.meta.url);
 const appPageRequestPath = resolveEntryPath("../server/app-page-request.js", import.meta.url);
 const appPageMethodPath = resolveEntryPath("../server/app-page-method.js", import.meta.url);
+const appStaticGenerationPath = resolveEntryPath(
+  "../server/app-static-generation.js",
+  import.meta.url,
+);
 const appRouteHandlerResponsePath = resolveEntryPath(
   "../server/app-route-handler-response.js",
   import.meta.url,
@@ -463,6 +467,9 @@ import {
 import {
   resolveAppPageMethodResponse as __resolveAppPageMethodResponse,
 } from ${JSON.stringify(appPageMethodPath)};
+import {
+  createStaticGenerationHeadersContext as __createStaticGenerationHeadersContext,
+} from ${JSON.stringify(appStaticGenerationPath)};
 import {
   applyRouteHandlerMiddlewareContext as __applyRouteHandlerMiddlewareContext,
 } from ${JSON.stringify(appRouteHandlerResponsePath)};
@@ -1925,6 +1932,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           __clearRequestContext();
         },
         consumeDynamicUsage,
+        dynamicConfig: handler.dynamic,
         getCollectedFetchTags,
         handlerFn,
         i18n: __i18nConfig,
@@ -1941,7 +1949,11 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         revalidateSeconds,
         routePattern: route.pattern,
         runInRevalidationContext: async function(renderFn) {
-          const __revalHeadCtx = { headers: new Headers(), cookies: new Map() };
+          const __revalHeadCtx = __createStaticGenerationHeadersContext({
+            dynamicConfig: handler.dynamic,
+            routeKind: "route",
+            routePattern: route.pattern,
+          });
           const __revalUCtx = _createUnifiedCtx({
             headersContext: __revalHeadCtx,
             executionContext: _getRequestExecutionContext(),
@@ -1954,6 +1966,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           });
         },
         scheduleBackgroundRegeneration: __triggerBackgroundRegeneration,
+        setHeadersAccessPhase,
         setNavigationContext,
       });
       if (__cachedRouteResponse) {
@@ -2026,15 +2039,18 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     revalidateSeconds,
   });
   if (__methodResponse) {
-    setHeadersContext(null);
-    setNavigationContext(null);
+    __clearRequestContext();
     return __methodResponse;
   }
 
   // force-static: replace headers/cookies context with empty values and
   // clear searchParams so dynamic APIs return defaults instead of real data
   if (isForceStatic) {
-    setHeadersContext({ headers: new Headers(), cookies: new Map() });
+    setHeadersContext(__createStaticGenerationHeadersContext({
+      dynamicConfig,
+      routeKind: "page",
+      routePattern: route.pattern,
+    }));
     setNavigationContext({
       pathname: cleanPathname,
       searchParams: new URLSearchParams(),
@@ -2045,15 +2061,11 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   // dynamic = 'error': install an access error so request APIs fail with the
   // static-generation message even for legacy sync property access.
   if (isDynamicError) {
-    const errorMsg = 'Page with \`dynamic = "error"\` used a dynamic API. ' +
-      'This page was expected to be fully static, but headers(), cookies(), ' +
-      'or searchParams was accessed. Remove the dynamic API usage or change ' +
-      'the dynamic config to "auto" or "force-dynamic".';
-    setHeadersContext({
-      headers: new Headers(),
-      cookies: new Map(),
-      accessError: new Error(errorMsg),
-    });
+    setHeadersContext(__createStaticGenerationHeadersContext({
+      dynamicConfig,
+      routeKind: "page",
+      routePattern: route.pattern,
+    }));
     setNavigationContext({
       pathname: cleanPathname,
       searchParams: new URLSearchParams(),
@@ -2102,7 +2114,11 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         // Use an empty headers context for background regeneration — not the original
         // user request — to prevent user-specific cookies/auth headers from leaking
         // into content that is cached and served to all subsequent users.
-        const __revalHeadCtx = { headers: new Headers(), cookies: new Map() };
+        const __revalHeadCtx = __createStaticGenerationHeadersContext({
+          dynamicConfig,
+          routeKind: "page",
+          routePattern: route.pattern,
+        });
         const __revalUCtx = _createUnifiedCtx({
           headersContext: __revalHeadCtx,
           executionContext: _getRequestExecutionContext(),
