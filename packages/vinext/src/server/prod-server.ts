@@ -1171,6 +1171,28 @@ type PagesRouterServerOptions = {
   purpose?: ProdServerOptions["purpose"];
 };
 
+type PagesServerEntryPageRoute = {
+  pattern: string;
+  module?: {
+    getStaticPaths?: (opts: { locales: string[]; defaultLocale: string }) => Promise<unknown>;
+  };
+};
+
+function isPagesServerEntryPageRoute(value: unknown): value is PagesServerEntryPageRoute {
+  if (!value || typeof value !== "object" || !("pattern" in value)) return false;
+  if (typeof value.pattern !== "string") return false;
+
+  if (!("module" in value) || value.module === undefined) return true;
+  const pageModule = value.module;
+  if (!pageModule || typeof pageModule !== "object") return false;
+
+  return !("getStaticPaths" in pageModule) || typeof pageModule.getStaticPaths === "function";
+}
+
+function readPagesServerEntryPageRoutes(value: unknown): PagesServerEntryPageRoute[] | undefined {
+  return Array.isArray(value) && value.every(isPagesServerEntryPageRoute) ? value : undefined;
+}
+
 /**
  * Start the Pages Router production server.
  *
@@ -1189,6 +1211,9 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
   const serverMtime = fs.statSync(serverEntryPath).mtimeMs;
   const serverEntry = await import(`${pathToFileURL(serverEntryPath).href}?t=${serverMtime}`);
   const { renderPage, handleApiRoute: handleApi, runMiddleware, vinextConfig } = serverEntry;
+  const matchPageRoute =
+    typeof serverEntry.matchPageRoute === "function" ? serverEntry.matchPageRoute : undefined;
+  const pageRoutes = readPagesServerEntryPageRoutes(serverEntry.pageRoutes);
 
   // Load prerender secret written at build time by vinext:server-manifest plugin.
   // Used to authenticate internal /__vinext/prerender/* HTTP endpoints.
@@ -1293,17 +1318,6 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
       const localesRaw = parsedUrl.searchParams.get("locales");
       const locales: string[] = localesRaw ? JSON.parse(localesRaw) : [];
       const defaultLocale = parsedUrl.searchParams.get("defaultLocale") ?? "";
-      const pageRoutes = serverEntry.pageRoutes as
-        | Array<{
-            pattern: string;
-            module?: {
-              getStaticPaths?: (opts: {
-                locales: string[];
-                defaultLocale: string;
-              }) => Promise<unknown>;
-            };
-          }>
-        | undefined;
       const route = pageRoutes?.find((r) => r.pattern === pattern);
       const fn = route?.module?.getStaticPaths;
       if (typeof fn !== "function") {
@@ -1656,8 +1670,11 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
         return;
       }
 
+      const pageMatch = matchPageRoute ? matchPageRoute(resolvedPathname, webRequest) : null;
+
       // ── 9. Apply afterFiles rewrites from next.config.js ──────────
-      if (configRewrites.afterFiles?.length) {
+      // These run after non-dynamic page routes but before dynamic routes.
+      if ((!pageMatch || pageMatch.route.isDynamic) && configRewrites.afterFiles?.length) {
         const rewritten = matchRewrite(resolvedPathname, configRewrites.afterFiles, postMwReqCtx);
         if (rewritten) {
           if (isExternalUrl(rewritten)) {

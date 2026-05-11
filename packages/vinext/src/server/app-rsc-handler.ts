@@ -60,6 +60,7 @@ type RootParamNamesMap = Parameters<
 type AppRscMiddlewareContext = AppMiddlewareContext;
 
 type AppRscHandlerRoute = {
+  isDynamic: boolean;
   page?: unknown;
   pattern: string;
   rootParamNames?: readonly string[];
@@ -378,19 +379,24 @@ async function handleAppRscRequest<TRoute extends AppRscHandlerRoute>(
   });
   if (serverActionResponse) return serverActionResponse;
 
-  const afterFilesRewrite = await applyRewrite(
-    {
-      clearRequestContext: options.clearRequestContext,
-      request,
-      requestContext: postMiddlewareRequestContext,
-      rewrites: options.configRewrites.afterFiles,
-    },
-    cleanPathname,
-  );
-  if (afterFilesRewrite instanceof Response) return afterFilesRewrite;
-  if (afterFilesRewrite) cleanPathname = afterFilesRewrite;
-
   let match = options.matchRoute(cleanPathname);
+  if (!match || match.route.isDynamic) {
+    const afterFilesRewrite = await applyRewrite(
+      {
+        clearRequestContext: options.clearRequestContext,
+        request,
+        requestContext: postMiddlewareRequestContext,
+        rewrites: options.configRewrites.afterFiles,
+      },
+      cleanPathname,
+    );
+    if (afterFilesRewrite instanceof Response) return afterFilesRewrite;
+    if (afterFilesRewrite) {
+      cleanPathname = afterFilesRewrite;
+      match = options.matchRoute(cleanPathname);
+    }
+  }
+
   if (!match) {
     const fallbackRewrite = await applyRewrite(
       {

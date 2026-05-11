@@ -2722,17 +2722,20 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
 
               const routes = await pagesRouter(pagesDir, nextConfig?.pageExtensions, fileMatcher);
 
-              // Apply afterFiles rewrites — these run after initial route matching
-              // If beforeFiles already rewrote the URL, afterFiles still run on the
-              // *resolved* pathname. Next.js applies these when route matching succeeds
-              // but allows overriding with rewrites.
-              if (nextConfig?.rewrites.afterFiles.length) {
+              let match = matchRoute(resolvedUrl.split("?")[0], routes);
+
+              // Apply afterFiles rewrites after non-dynamic page routes have had a
+              // chance to win, but before dynamic route matching.
+              if ((!match || match.route.isDynamic) && nextConfig?.rewrites.afterFiles.length) {
                 const afterRewrite = applyRewrites(
                   resolvedUrl.split("?")[0],
                   nextConfig.rewrites.afterFiles,
                   reqCtx,
                 );
-                if (afterRewrite) resolvedUrl = afterRewrite;
+                if (afterRewrite) {
+                  resolvedUrl = afterRewrite;
+                  match = matchRoute(resolvedUrl.split("?")[0], routes);
+                }
               }
 
               // External rewrite from afterFiles — proxy to external URL
@@ -2756,7 +2759,6 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               const mwStatus = req.__vinextMiddlewareStatus;
 
               // Try rendering the resolved URL
-              const match = matchRoute(resolvedUrl.split("?")[0], routes);
               if (match) {
                 applyDeferredMwHeaders();
                 if (middlewareRequestHeaders) {

@@ -9,6 +9,7 @@ import { createAppRscHandler } from "../packages/vinext/src/server/app-rsc-handl
 import { makeThenableParams } from "../packages/vinext/src/shims/thenable-params.js";
 
 type TestRoute = {
+  isDynamic: boolean;
   page?: { default?: unknown } | null;
   pattern: string;
   rootParamNames?: readonly string[];
@@ -20,6 +21,7 @@ type HandlerOptions = Parameters<typeof createAppRscHandler<TestRoute>>[0];
 
 function createPageRoute(overrides: Partial<TestRoute> = {}): TestRoute {
   return {
+    isDynamic: false,
     page: { default() {} },
     pattern: "/about",
     routeSegments: ["about"],
@@ -223,6 +225,79 @@ describe("createAppRscHandler", () => {
     expect(matchRoute).toHaveBeenLastCalledWith("/about");
     expect(dispatchMatchedPage).toHaveBeenCalledWith(
       expect.objectContaining({ cleanPathname: "/about" }),
+    );
+  });
+
+  it("does not let afterFiles rewrites override non-dynamic app routes", async () => {
+    const routes = {
+      "/about": createPageRoute({ pattern: "/about", routeSegments: ["about"] }),
+      "/nav": createPageRoute({ pattern: "/nav", routeSegments: ["nav"] }),
+    };
+    const dispatchMatchedPage = vi.fn(
+      async ({ route }) => new Response(`page:${route.pattern}`, { status: 200 }),
+    );
+    const handler = createHandler({
+      configHeaders: [],
+      configRewrites: {
+        beforeFiles: [],
+        afterFiles: [{ source: "/nav", destination: "/about" }],
+        fallback: [],
+      },
+      dispatchMatchedPage,
+      matchRoute: (pathname: string) => {
+        if (pathname === "/about") return { params: {}, route: routes["/about"] };
+        if (pathname === "/nav") return { params: {}, route: routes["/nav"] };
+        return null;
+      },
+    });
+
+    const response = await handler(new Request("https://example.test/docs/nav"), null);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("page:/nav");
+    expect(dispatchMatchedPage).toHaveBeenCalledWith(
+      expect.objectContaining({ cleanPathname: "/nav", route: routes["/nav"] }),
+    );
+  });
+
+  it("runs afterFiles rewrites before dynamic app route matching", async () => {
+    const routes = {
+      "/about": createPageRoute({ pattern: "/about", routeSegments: ["about"] }),
+      dynamicBlog: createPageRoute({
+        isDynamic: true,
+        pattern: "/blog/:slug",
+        routeSegments: ["blog", "[slug]"],
+      }),
+    };
+    const dispatchMatchedPage = vi.fn(
+      async ({ route }) => new Response(`page:${route.pattern}`, { status: 200 }),
+    );
+    const emptyParams: Record<string, string | string[]> = {};
+    const legacyParams: Record<string, string | string[]> = { slug: "legacy" };
+    const matchRoute: HandlerOptions["matchRoute"] = (pathname) => {
+      if (pathname === "/about") return { params: emptyParams, route: routes["/about"] };
+      if (pathname === "/blog/legacy") {
+        return { params: legacyParams, route: routes.dynamicBlog };
+      }
+      return null;
+    };
+    const handler = createHandler({
+      configHeaders: [],
+      configRewrites: {
+        beforeFiles: [],
+        afterFiles: [{ source: "/blog/legacy", destination: "/about" }],
+        fallback: [],
+      },
+      dispatchMatchedPage,
+      matchRoute,
+    });
+
+    const response = await handler(new Request("https://example.test/docs/blog/legacy"), null);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("page:/about");
+    expect(dispatchMatchedPage).toHaveBeenCalledWith(
+      expect.objectContaining({ cleanPathname: "/about", route: routes["/about"] }),
     );
   });
 

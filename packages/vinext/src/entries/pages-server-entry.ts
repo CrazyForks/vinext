@@ -276,6 +276,20 @@ function matchRoute(url, routes) {
   return _trieMatch(trie, urlParts);
 }
 
+export function matchPageRoute(url, request) {
+  const routeUrl = i18nConfig && request
+    ? resolvePagesI18nRequest(
+        url,
+        i18nConfig,
+        request.headers,
+        new URL(request.url).hostname,
+        vinextConfig.basePath,
+        vinextConfig.trailingSlash,
+      ).url
+    : url;
+  return matchRoute(routeUrl, pageRoutes);
+}
+
 function parseQuery(url) {
   const qs = url.split("?")[1];
   if (!qs) return {};
