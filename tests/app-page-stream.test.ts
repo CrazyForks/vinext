@@ -89,6 +89,31 @@ describe("app page stream helpers", () => {
     );
   });
 
+  it("forwards form state to the SSR handler", async () => {
+    const formState = ["action-result", "key-path", "reference-id", 1] as never;
+    const ssrHandler = vi.fn(async () => createStream(["<html>form-state</html>"]));
+
+    const htmlStream = await renderAppPageHtmlStream({
+      fontData: createAppPageFontData({
+        getLinks: () => [],
+        getPreloads: () => [],
+        getStyles: () => [],
+      }),
+      formState,
+      navigationContext: null,
+      rscStream: createStream(["flight"]),
+      ssrHandler: { handleSsr: ssrHandler },
+    });
+
+    await expect(new Response(htmlStream).text()).resolves.toBe("<html>form-state</html>");
+    expect(ssrHandler).toHaveBeenCalledWith(
+      expect.anything(),
+      null,
+      expect.anything(),
+      expect.objectContaining({ formState }),
+    );
+  });
+
   it("defers clearRequestContext until the HTML stream body is fully consumed", async () => {
     // Regression test for issue #660: clearRequestContext() must not race the
     // lazy RSC/SSR stream pipeline. It should be called only after the HTTP

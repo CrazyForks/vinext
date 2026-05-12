@@ -1,6 +1,11 @@
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { createOnUncaughtError } from "../packages/vinext/src/server/app-browser-error.js";
+import {
+  RSC_FORM_STATE_GLOBAL,
+  consumeInitialFormState,
+  createVinextHydrateRootOptions,
+} from "../packages/vinext/src/server/app-browser-hydration.js";
 import { createAppBrowserNavigationController } from "../packages/vinext/src/server/app-browser-navigation-controller.js";
 import { devOnCaughtError } from "../packages/vinext/src/server/dev-error-overlay.js";
 import {
@@ -2579,6 +2584,50 @@ describe("createOnUncaughtError (hydrateRoot uncaught handler)", () => {
     } finally {
       consoleSpy.mockRestore();
     }
+  });
+});
+
+describe("app browser form-state hydration", () => {
+  it("passes the one-shot form-state bootstrap payload to hydrateRoot options", () => {
+    const formState = ["action-result", "key-path", "reference-id", 1] as never;
+    const global = { [RSC_FORM_STATE_GLOBAL]: formState };
+    const onCaughtError = vi.fn();
+    const onUncaughtError = vi.fn();
+    const hydrateRoot = vi.fn();
+
+    const consumedFormState = consumeInitialFormState(global);
+    const hydrateOptions = createVinextHydrateRootOptions({
+      formState: consumedFormState,
+      onCaughtError,
+      onUncaughtError,
+    });
+    hydrateRoot("document", "root", hydrateOptions);
+
+    expect(global).not.toHaveProperty(RSC_FORM_STATE_GLOBAL);
+    expect(hydrateRoot).toHaveBeenCalledWith(
+      "document",
+      "root",
+      expect.objectContaining({ formState }),
+    );
+    expect(hydrateOptions).toEqual({
+      formState,
+      onCaughtError,
+      onUncaughtError,
+    });
+  });
+
+  it("preserves null form state as an explicit hydrateRoot option", () => {
+    const onUncaughtError = vi.fn();
+
+    expect(
+      createVinextHydrateRootOptions({
+        formState: consumeInitialFormState({}),
+        onUncaughtError,
+      }),
+    ).toEqual({
+      formState: null,
+      onUncaughtError,
+    });
   });
 });
 

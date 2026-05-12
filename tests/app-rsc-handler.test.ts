@@ -93,6 +93,33 @@ describe("createAppRscHandler", () => {
     expect(response.headers.get("vary")).toBe(VINEXT_RSC_VARY_HEADER);
   });
 
+  it("marks progressive action page renders even when decoded form state is null", async () => {
+    const dispatchMatchedPage = vi.fn(async () => new Response("page", { status: 200 }));
+    const handler = createHandler({
+      configHeaders: [],
+      dispatchMatchedPage,
+      async handleProgressiveActionRequest() {
+        return { kind: "form-state", formState: null };
+      },
+    });
+
+    const response = await handler(
+      new Request("https://example.test/docs/about", {
+        method: "POST",
+        headers: { "content-type": "multipart/form-data; boundary=vinext" },
+      }),
+      null,
+    );
+
+    expect(response.status).toBe(200);
+    expect(dispatchMatchedPage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        formState: null,
+        isProgressiveActionRender: true,
+      }),
+    );
+  });
+
   it("returns config redirects before route dispatch and skips finalization", async () => {
     const dispatchMatchedPage = vi.fn(async () => new Response("page", { status: 200 }));
     const handler = createHandler({

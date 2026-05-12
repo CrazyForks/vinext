@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import type { ReactFormState } from "react-dom/client";
 import type { CachedAppPageValue } from "vinext/shims/cache";
 import { runWithFetchDedupe } from "vinext/shims/fetch-cache";
 import { AppElementsWire, isAppElementsRecord, type AppOutgoingElements } from "./app-elements.js";
@@ -79,6 +80,7 @@ type RenderAppPageLifecycleOptions = {
   isDraftMode: boolean;
   isForceDynamic: boolean;
   isForceStatic: boolean;
+  isProgressiveActionRender?: boolean;
   isPrerender?: boolean;
   isProduction: boolean;
   isRscRequest: boolean;
@@ -93,6 +95,7 @@ type RenderAppPageLifecycleOptions = {
   probeLayoutAt: (layoutIndex: number) => unknown;
   probePage: () => unknown;
   expireSeconds?: number;
+  formState?: ReactFormState | null;
   revalidateSeconds: number | null;
   renderErrorBoundaryResponse: (error: unknown) => Promise<Response | null>;
   renderLayoutSpecialError: (
@@ -314,6 +317,7 @@ export async function renderAppPageLifecycle(
   let revalidateSeconds = options.revalidateSeconds;
   let expireSeconds = options.expireSeconds;
   const shouldCaptureRscForCacheMetadata =
+    options.isProgressiveActionRender !== true &&
     (options.isProduction || options.isPrerender === true) &&
     (revalidateSeconds === null || (revalidateSeconds > 0 && revalidateSeconds !== Infinity)) &&
     !options.isDraftMode &&
@@ -430,6 +434,7 @@ export async function renderAppPageLifecycle(
         capturedRscDataRef,
         fontData,
         navigationContext: options.getNavigationContext(),
+        formState: options.formState ?? null,
         rscStream: rscForResponse,
         scriptNonce: options.scriptNonce,
         sideStream: rscCapture.sideStream,
@@ -514,6 +519,7 @@ export async function renderAppPageLifecycle(
 
   const htmlResponsePolicy = resolveAppPageHtmlResponsePolicy({
     dynamicUsedDuringRender,
+    isProgressiveActionRender: options.isProgressiveActionRender === true,
     hasScriptNonce: Boolean(options.scriptNonce),
     isDraftMode: options.isDraftMode,
     isDynamicError: options.isDynamicError,
@@ -538,6 +544,7 @@ export async function renderAppPageLifecycle(
     !options.isDynamicError &&
     !options.isForceStatic &&
     !options.scriptNonce &&
+    options.isProgressiveActionRender !== true &&
     !dynamicUsedDuringRender;
 
   if (htmlResponsePolicy.shouldWriteToCache || shouldSpeculativelyWriteCache) {

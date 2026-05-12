@@ -46,6 +46,10 @@ import {
   type PendingBrowserRouterState,
 } from "./app-browser-navigation-controller.js";
 import {
+  consumeInitialFormState,
+  createVinextHydrateRootOptions,
+} from "./app-browser-hydration.js";
+import {
   AppElementsWire,
   getMountedSlotIdsHeader,
   resolveVisitedResponseInterceptionContext,
@@ -904,15 +908,24 @@ function bootstrapHydration(rscStream: ReadableStream<Uint8Array>): void {
   const onUncaughtError = import.meta.env.DEV
     ? devOnUncaughtError
     : createOnUncaughtError(() => pendingNavigationRecoveryHref);
+  const formState = consumeInitialFormState(getVinextBrowserGlobal());
+  const hydrateRootOptions = import.meta.env.DEV
+    ? createVinextHydrateRootOptions({
+        formState,
+        onCaughtError: devOnCaughtError,
+        onUncaughtError,
+      })
+    : createVinextHydrateRootOptions({
+        formState,
+        onUncaughtError,
+      });
   window.__VINEXT_RSC_ROOT__ = hydrateRoot(
     document,
     createElement(BrowserRoot, {
       initialElements: root,
       initialNavigationSnapshot,
     }),
-    import.meta.env.DEV
-      ? { onCaughtError: devOnCaughtError, onUncaughtError }
-      : { onUncaughtError },
+    hydrateRootOptions,
   );
   window.__VINEXT_HYDRATED_AT = performance.now();
 

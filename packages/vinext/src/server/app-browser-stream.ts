@@ -1,3 +1,6 @@
+import type { ReactFormState } from "react-dom/client";
+import { RSC_FORM_STATE_GLOBAL } from "./app-browser-hydration.js";
+
 type NavigationSnapshot = {
   pathname: string;
   searchParams: [string, string][];
@@ -13,6 +16,7 @@ type VinextBrowserGlobals = {
   __VINEXT_RSC__?: LegacyRscEmbedData;
   __VINEXT_RSC_CHUNKS__?: string[];
   __VINEXT_RSC_DONE__?: boolean;
+  [RSC_FORM_STATE_GLOBAL]?: ReactFormState;
   __VINEXT_RSC_PARAMS__?: Record<string, string | string[]>;
   __VINEXT_RSC_NAV__?: NavigationSnapshot;
 };
