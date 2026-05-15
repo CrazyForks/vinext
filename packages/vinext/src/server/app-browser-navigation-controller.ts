@@ -17,6 +17,10 @@ import {
   resolveAndClassifyNavigationCommit,
   type ApprovedVisibleCommit,
 } from "./app-browser-visible-commit.js";
+import {
+  shouldScheduleRefreshForDiscardedServerAction,
+  type ServerActionRevalidationKind,
+} from "./app-browser-action-result.js";
 import type { AppElements } from "./app-elements.js";
 
 export type HistoryUpdateMode = "push" | "replace";
@@ -41,6 +45,13 @@ type BrowserRouterStateRef = {
   current: AppRouterState;
 };
 
+type SameUrlServerActionLifecycleOptions = {
+  onDiscardedRevalidation?: () => void;
+  revalidation?: ServerActionRevalidationKind;
+  startedNavigationId?: number;
+  targetHref?: string;
+};
+
 type BrowserNavigationControllerDeps = {
   commitClientNavigationState?: typeof commitClientNavigationState;
   performHardNavigation?: (href: string, mode?: HardNavigationMode) => boolean;
@@ -48,6 +59,7 @@ type BrowserNavigationControllerDeps = {
 
 type BrowserNavigationController = {
   beginNavigation(): number;
+  getActiveNavigationId(): number;
   hasBrowserRouterState(): boolean;
   getBrowserRouterState(): AppRouterState;
   isCurrentNavigation(navId: number): boolean;
@@ -76,6 +88,7 @@ type BrowserNavigationController = {
     navigationSnapshot: ClientNavigationRenderSnapshot,
     returnValue?: { ok: boolean; data: unknown },
     actionInitiationState?: AppRouterState,
+    lifecycleOptions?: SameUrlServerActionLifecycleOptions,
   ): Promise<unknown>;
   hmrReplaceTree(
     nextElements: Promise<AppElements>,
@@ -240,6 +253,10 @@ export function createAppBrowserNavigationController(
 
   function beginNavigation(): number {
     activeNavigationId += 1;
+    return activeNavigationId;
+  }
+
+  function getActiveNavigationId(): number {
     return activeNavigationId;
   }
 
@@ -452,6 +469,15 @@ export function createAppBrowserNavigationController(
     setter(applyApprovedVisibleCommit(getBrowserRouterState(), commit));
   }
 
+  function notifyDiscardedServerActionRevalidation(
+    lifecycleOptions: SameUrlServerActionLifecycleOptions | undefined,
+  ): void {
+    const revalidation = lifecycleOptions?.revalidation ?? "none";
+    if (!shouldScheduleRefreshForDiscardedServerAction(revalidation)) return;
+
+    lifecycleOptions?.onDiscardedRevalidation?.();
+  }
+
   async function renderNavigationPayload(options: {
     actionType: "navigate" | "replace" | "traverse";
     createNavigationCommitEffect: BrowserNavigationCommitEffectFactory;
@@ -543,9 +569,11 @@ export function createAppBrowserNavigationController(
     navigationSnapshot: ClientNavigationRenderSnapshot,
     returnValue?: { ok: boolean; data: unknown },
     actionInitiationState?: AppRouterState,
+    lifecycleOptions?: SameUrlServerActionLifecycleOptions,
   ): Promise<unknown> {
     const currentState = actionInitiationState ?? getBrowserRouterState();
-    const startedNavigationId = activeNavigationId;
+    const startedNavigationId = lifecycleOptions?.startedNavigationId ?? activeNavigationId;
+    const targetHref = lifecycleOptions?.targetHref ?? window.location.href;
     const {
       approvedCommit,
       decision,
@@ -564,7 +592,7 @@ export function createAppBrowserNavigationController(
       renderId: allocateRenderId(),
       operationLane: "server-action",
       startedNavigationId,
-      targetHref: window.location.href,
+      targetHref,
       type: "navigate",
     });
 
@@ -572,7 +600,7 @@ export function createAppBrowserNavigationController(
       // Same-URL action hard navigations do not expose a navigation outcome to
       // callers. If the loop guard blocks, the degraded state is still the
       // existing return contract: no visible commit and no action value.
-      performHardNavigation(window.location.href);
+      performHardNavigation(targetHref);
       return undefined;
     }
 
@@ -584,19 +612,23 @@ export function createAppBrowserNavigationController(
         currentState: getBrowserRouterState(),
         pending,
         startedNavigationId,
-        targetHref: window.location.href,
+        targetHref,
       });
 
       if (latestApproval.decision.disposition === "hard-navigate") {
         // See the same-URL hard-navigation note above. The guard result is
         // deliberately not surfaced through the server-action return channel.
-        performHardNavigation(window.location.href);
+        performHardNavigation(targetHref);
         return undefined;
       }
 
       if (latestApproval.approvedCommit) {
         dispatchSynchronousVisibleCommit(latestApproval.approvedCommit);
+      } else {
+        notifyDiscardedServerActionRevalidation(lifecycleOptions);
       }
+    } else if (decision.disposition === "no-commit") {
+      notifyDiscardedServerActionRevalidation(lifecycleOptions);
     }
 
     // Same-URL server actions still return their action value even if the UI
@@ -634,6 +666,7 @@ export function createAppBrowserNavigationController(
 
   return {
     beginNavigation,
+    getActiveNavigationId,
     hasBrowserRouterState,
     getBrowserRouterState,
     isCurrentNavigation,

@@ -15,6 +15,14 @@ import { waitForAppRouterHydration } from "../../helpers";
 const BASE = "http://localhost:4174";
 
 test.describe("Next.js compat: actions-revalidate (browser)", () => {
+  function waitForActionDiscardingResponse(page: Page) {
+    return page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        response.url().includes("/nextjs-compat/action-discarding.rsc"),
+    );
+  }
+
   async function expectActionRefreshPreservesLoading(page: Page, buttonSelector: string) {
     const loadingLogs: string[] = [];
     page.on("console", (message) => {
@@ -49,6 +57,52 @@ test.describe("Next.js compat: actions-revalidate (browser)", () => {
 
   test("refresh() inside server action does not mount route loading", async ({ page }) => {
     await expectActionRefreshPreservesLoading(page, "#action-refresh-from-server");
+  });
+
+  // Ported from Next.js: test/e2e/app-dir/actions/app-action.test.ts
+  // "action discarding" coverage. Vinext uses a local counter instead of a
+  // remote fetch cache so the assertion is deterministic.
+  test("discarded server action without revalidation does not refresh current route", async ({
+    page,
+  }) => {
+    await page.goto(`${BASE}/nextjs-compat/action-discarding`);
+    await waitForAppRouterHydration(page);
+
+    const initialValue = await page.locator("#discarded-action-value").textContent();
+    if (!initialValue) {
+      throw new Error("Expected initial discarded action value");
+    }
+
+    const actionResponse = waitForActionDiscardingResponse(page);
+    await page.click("#slow-action");
+    await page.click("#navigate-discard-destination");
+    await expect(page.locator("#discard-destination")).toBeVisible();
+    await actionResponse;
+
+    await expect(page.locator("#discarded-action-value")).toHaveText(initialValue);
+  });
+
+  // Ported from Next.js: test/e2e/app-dir/actions/app-action.test.ts
+  // "should trigger a refresh for a server action that gets discarded due to
+  // a navigation (with revalidation)".
+  test("discarded server action with revalidation refreshes current route", async ({ page }) => {
+    await page.goto(`${BASE}/nextjs-compat/action-discarding`);
+    await waitForAppRouterHydration(page);
+
+    const initialValue = await page.locator("#discarded-action-value").textContent();
+    if (!initialValue) {
+      throw new Error("Expected initial discarded action value");
+    }
+
+    const actionResponse = waitForActionDiscardingResponse(page);
+    await page.click("#slow-action-refresh");
+    await page.click("#navigate-discard-destination");
+    await expect(page.locator("#discard-destination")).toBeVisible();
+    await actionResponse;
+
+    await expect(page.locator("#discarded-action-value")).not.toHaveText(initialValue, {
+      timeout: 10_000,
+    });
   });
 
   // Next.js: 'should not remount the page + loading component when revalidating'

@@ -1,7 +1,13 @@
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { createOnUncaughtError } from "../packages/vinext/src/server/app-browser-error.js";
-import { shouldClearClientNavigationCachesForServerActionResult } from "../packages/vinext/src/server/app-browser-action-result.js";
+import {
+  createDiscardedServerActionRefreshScheduler,
+  createServerActionInitiationSnapshot,
+  parseServerActionRevalidationHeader,
+  shouldClearClientNavigationCachesForServerActionResult,
+  shouldScheduleRefreshForDiscardedServerAction,
+} from "../packages/vinext/src/server/app-browser-action-result.js";
 import {
   RSC_FORM_STATE_GLOBAL,
   consumeInitialFormState,
@@ -55,6 +61,7 @@ import {
   createNavigationTrace,
 } from "../packages/vinext/src/server/navigation-trace.js";
 import {
+  ACTION_REVALIDATED_HEADER,
   VINEXT_MOUNTED_SLOTS_HEADER,
   VINEXT_PARAMS_HEADER,
 } from "../packages/vinext/src/server/headers.js";
@@ -324,6 +331,44 @@ describe("app browser entry navigation scheduling", () => {
     expect(await replayed.text()).toBe("flight");
   });
 
+  it("parses action revalidation headers into explicit client effects", () => {
+    expect(parseServerActionRevalidationHeader(new Headers())).toBe("none");
+    expect(
+      parseServerActionRevalidationHeader(new Headers({ [ACTION_REVALIDATED_HEADER]: "1" })),
+    ).toBe("staticAndDynamic");
+    expect(
+      parseServerActionRevalidationHeader(new Headers({ [ACTION_REVALIDATED_HEADER]: "2" })),
+    ).toBe("dynamicOnly");
+    expect(
+      parseServerActionRevalidationHeader(
+        new Headers({ [ACTION_REVALIDATED_HEADER]: JSON.stringify("1") }),
+      ),
+    ).toBe("none");
+    expect(
+      parseServerActionRevalidationHeader(new Headers({ [ACTION_REVALIDATED_HEADER]: "not-json" })),
+    ).toBe("none");
+  });
+
+  it("captures server action initiation URL state without a hash in the request path", () => {
+    const routerState = createState({
+      navigationSnapshot: createClientNavigationRenderSnapshot("https://example.com/a?tab=1", {
+        slug: "a",
+      }),
+      routeId: "route:/a",
+    });
+
+    const snapshot = createServerActionInitiationSnapshot({
+      href: "https://example.com/a?tab=1#section",
+      navigationId: 42,
+      routerState,
+    });
+
+    expect(snapshot.href).toBe("https://example.com/a?tab=1#section");
+    expect(snapshot.navigationId).toBe(42);
+    expect(snapshot.path).toBe("/a?tab=1");
+    expect(snapshot.routerState).toBe(routerState);
+  });
+
   it("keeps client navigation caches for no-root server action results", () => {
     expect(
       shouldClearClientNavigationCachesForServerActionResult({
@@ -341,6 +386,55 @@ describe("app browser entry navigation scheduling", () => {
         createResolvedElements("route:/settings", "/"),
       ),
     ).toBe(true);
+    expect(
+      shouldClearClientNavigationCachesForServerActionResult(
+        {
+          returnValue: { ok: true, data: "action-result" },
+        },
+        "staticAndDynamic",
+      ),
+    ).toBe(true);
+    expect(
+      shouldClearClientNavigationCachesForServerActionResult(
+        {
+          returnValue: { ok: true, data: "action-result" },
+        },
+        "dynamicOnly",
+      ),
+    ).toBe(true);
+  });
+
+  it("schedules discarded action refreshes only for revalidated actions", () => {
+    expect(shouldScheduleRefreshForDiscardedServerAction("none")).toBe(false);
+    expect(shouldScheduleRefreshForDiscardedServerAction("dynamicOnly")).toBe(true);
+    expect(shouldScheduleRefreshForDiscardedServerAction("staticAndDynamic")).toBe(true);
+  });
+
+  it("coalesces discarded action refreshes until active navigation settles", () => {
+    const queued: Array<() => void> = [];
+    const runRefresh = vi.fn();
+    const scheduler = createDiscardedServerActionRefreshScheduler({
+      queueTask(callback) {
+        queued.push(callback);
+      },
+      runRefresh,
+    });
+
+    scheduler.markNavigationStart();
+    scheduler.schedule();
+    scheduler.schedule();
+    expect(runRefresh).not.toHaveBeenCalled();
+
+    queued.shift()?.();
+    expect(runRefresh).not.toHaveBeenCalled();
+
+    scheduler.markNavigationSettled();
+    queued.shift()?.();
+    expect(runRefresh).toHaveBeenCalledTimes(1);
+
+    scheduler.schedule();
+    queued.shift()?.();
+    expect(runRefresh).toHaveBeenCalledTimes(2);
   });
 
   it("does not expose a per-navigation transition override at the controller boundary", () => {
@@ -1547,6 +1641,117 @@ describe("app browser navigation controller", () => {
     }
   });
 
+  it("reports discarded revalidating server action payloads for current-state refresh", async () => {
+    const initialState = createState({
+      rootLayoutTreePath: "/",
+      routeId: "route:/settings",
+      navigationSnapshot: createClientNavigationRenderSnapshot("https://example.com/settings", {
+        tab: "profile",
+      }),
+    });
+    const { controller, detach, stateRef } = createControllerHarness(initialState);
+    const { assign } = stubWindow("https://example.com/settings");
+    const onDiscardedRevalidation = vi.fn();
+    let resolveOlderPayload!: (elements: AppElements) => void;
+    const olderPayload = new Promise<AppElements>((resolve) => {
+      resolveOlderPayload = resolve;
+    });
+
+    try {
+      const olderResult = controller.commitSameUrlNavigatePayload(
+        olderPayload,
+        stateRef.current.navigationSnapshot,
+        {
+          data: "older-action-result",
+          ok: true,
+        },
+        undefined,
+        {
+          onDiscardedRevalidation,
+          revalidation: "staticAndDynamic",
+        },
+      );
+
+      await controller.commitSameUrlNavigatePayload(
+        Promise.resolve(
+          createResolvedElements("route:/settings/newer", "/", null, {
+            "page:/settings/newer": React.createElement("main", null, "newer"),
+          }),
+        ),
+        stateRef.current.navigationSnapshot,
+        {
+          data: "newer-action-result",
+          ok: true,
+        },
+      );
+
+      resolveOlderPayload(
+        createResolvedElements("route:/settings/older", "/", null, {
+          "page:/settings/older": React.createElement("main", null, "older"),
+        }),
+      );
+
+      await expect(olderResult).resolves.toBe("older-action-result");
+      expect(assign).not.toHaveBeenCalled();
+      expect(stateRef.current.routeId).toBe("route:/settings/newer");
+      expect(stateRef.current.visibleCommitVersion).toBe(1);
+      expect(onDiscardedRevalidation).toHaveBeenCalledTimes(1);
+    } finally {
+      detach();
+    }
+  });
+
+  it("discards revalidating server actions that started before an in-flight navigation", async () => {
+    const initialState = createState({
+      rootLayoutTreePath: "/",
+      routeId: "route:/settings",
+      navigationSnapshot: createClientNavigationRenderSnapshot("https://example.com/settings", {
+        tab: "profile",
+      }),
+    });
+    const { controller, detach, stateRef } = createControllerHarness(initialState);
+    const { assign } = stubWindow("https://example.com/settings");
+    const onDiscardedRevalidation = vi.fn();
+    const actionInitiationNavigationId = controller.getActiveNavigationId();
+    const actionInitiationState = stateRef.current;
+    let resolvePayload!: (elements: AppElements) => void;
+    const payload = new Promise<AppElements>((resolve) => {
+      resolvePayload = resolve;
+    });
+
+    try {
+      const result = controller.commitSameUrlNavigatePayload(
+        payload,
+        actionInitiationState.navigationSnapshot,
+        {
+          data: "action-result",
+          ok: true,
+        },
+        actionInitiationState,
+        {
+          onDiscardedRevalidation,
+          revalidation: "dynamicOnly",
+          startedNavigationId: actionInitiationNavigationId,
+        },
+      );
+
+      controller.beginNavigation();
+      resolvePayload(
+        createResolvedElements("route:/settings/action", "/", null, {
+          "page:/settings/action": React.createElement("main", null, "action"),
+        }),
+      );
+
+      await expect(result).resolves.toBe("action-result");
+      expect(assign).not.toHaveBeenCalled();
+      expect(stateRef.current.routeId).toBe("route:/settings");
+      expect(stateRef.current.visibleCommitVersion).toBe(0);
+      expect(onDiscardedRevalidation).toHaveBeenCalledTimes(1);
+    } finally {
+      detach();
+    }
+  });
+
   it("revalidates same-URL server action commits immediately before dispatch", async () => {
     const controller = createAppBrowserNavigationController();
     const initialState = createState({
@@ -1668,13 +1873,14 @@ describe("app browser navigation controller", () => {
   });
 
   it("hard-navigates same-URL server action payloads when the root layout changes", async () => {
+    const actionTargetHref = "https://example.com/marketing?from=action";
     const initialState = createState({
       rootLayoutTreePath: "/(marketing)",
       routeId: "route:/marketing",
-      navigationSnapshot: createClientNavigationRenderSnapshot("https://example.com/marketing", {}),
+      navigationSnapshot: createClientNavigationRenderSnapshot(actionTargetHref, {}),
     });
     const { controller, detach, stateRef } = createControllerHarness(initialState);
-    const { assign } = stubWindow("https://example.com/marketing");
+    const { assign } = stubWindow("https://example.com/current");
     const nextElements = Promise.resolve(
       createResolvedElements("route:/dashboard", "/(dashboard)", null, {
         "page:/dashboard": React.createElement("main", null, "dashboard"),
@@ -1685,11 +1891,16 @@ describe("app browser navigation controller", () => {
       const result = await controller.commitSameUrlNavigatePayload(
         nextElements,
         stateRef.current.navigationSnapshot,
+        undefined,
+        undefined,
+        {
+          targetHref: actionTargetHref,
+        },
       );
 
       expect(result).toBeUndefined();
       expect(assign).toHaveBeenCalledTimes(1);
-      expect(assign).toHaveBeenCalledWith("https://example.com/marketing");
+      expect(assign).toHaveBeenCalledWith(actionTargetHref);
       expect(stateRef.current.routeId).toBe("route:/marketing");
     } finally {
       detach();
