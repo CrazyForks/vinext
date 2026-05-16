@@ -1,8 +1,8 @@
 import type { AppRouteSemanticIds } from "../routing/app-route-graph.js";
 import { fnv1a64 } from "../utils/hash.js";
 
-export const CACHE_PROOF_MODEL_SCHEMA_VERSION = 0;
-export type CacheProofModelSchemaVersion = 0;
+export const CACHE_PROOF_MODEL_SCHEMA_VERSION = 1;
+export type CacheProofModelSchemaVersion = 1;
 
 export type CacheProofRejectionCode =
   | "CP_MODEL_DISABLED"
@@ -17,7 +17,8 @@ export type CacheProofRejectionCode =
   | "CP_ROUTE_VARIANT_CEILING_EXCEEDED"
   | "CP_UNSAFE_PUBLIC_DIMENSION"
   | "CP_BOUNDARY_OUTCOME_MISMATCH"
-  | "CP_BOUNDARY_OUTCOME_UNKNOWN";
+  | "CP_BOUNDARY_OUTCOME_UNKNOWN"
+  | "CP_PRIVATE_DYNAMIC_DOWNGRADE";
 
 export type CacheProofTraceFieldValue = string | number | boolean | null | readonly string[];
 
@@ -208,11 +209,93 @@ export type RenderRequestApiObservation = Readonly<{
   status: RenderRequestApiStatus;
 }>;
 
+export type CacheProofDowngradeTarget =
+  | "freshRender"
+  | "private"
+  | "privateUncacheable"
+  | "public"
+  | "publicVariant";
+
+export type CacheProofDowngradeReason =
+  | Readonly<{
+      code: "CP_DOWNGRADE_CACHEABILITY_PRIVATE";
+      target: "private";
+    }>
+  | Readonly<{
+      code: "CP_DOWNGRADE_CACHEABILITY_UNCACHEABLE";
+      target: "privateUncacheable";
+    }>
+  | Readonly<{
+      code: "CP_DOWNGRADE_CACHEABILITY_UNKNOWN";
+      target: "freshRender";
+    }>
+  | Readonly<{
+      code: "CP_DOWNGRADE_DYNAMIC_FETCH";
+      dynamicFetchCount: number;
+      target: "freshRender";
+    }>
+  | Readonly<{
+      code: "CP_DOWNGRADE_DYNAMIC_REQUEST_API";
+      requestApi: "connection";
+      target: "freshRender";
+    }>
+  | Readonly<{
+      code: "CP_DOWNGRADE_DRAFT_MODE";
+      requestApi: "draftMode";
+      target: "privateUncacheable";
+    }>
+  | Readonly<{
+      code: "CP_DOWNGRADE_INCOMPLETE_OBSERVATION";
+      completeness: Exclude<RenderObservationCompleteness, "complete">;
+      target: "freshRender";
+    }>
+  | Readonly<{
+      code: "CP_DOWNGRADE_PRIVATE_DIMENSION";
+      inputClass: "auth" | "draft" | "private" | "session";
+      source: "auth" | "cookie" | "draft-mode" | "header" | "session";
+      target: "private" | "privateUncacheable";
+    }>
+  | Readonly<{
+      code: "CP_DOWNGRADE_PRIVATE_REQUEST_API";
+      requestApi: "cookies" | "headers";
+      target: "private";
+    }>
+  | Readonly<{
+      code: "CP_DOWNGRADE_PUBLIC_REQUEST_API";
+      requestApi: "params" | "searchParams";
+      target: "publicVariant";
+    }>
+  | Readonly<{
+      code: "CP_DOWNGRADE_UNKNOWN_REQUEST_API";
+      requestApi: RenderRequestApiKind;
+      target: "freshRender";
+    }>;
+
+export type CacheProofDowngradeClassification = Readonly<{
+  fallback: CacheProofBreakerFallback | null;
+  isPublicCacheCandidate: boolean;
+  reasons: readonly CacheProofDowngradeReason[];
+  target: CacheProofDowngradeTarget;
+}>;
+
+export type ClassifyRenderObservationDowngradeInput = Readonly<{
+  cacheability: RenderCacheability;
+  completeness: RenderObservationCompleteness;
+  dynamicFetches: readonly string[];
+  requestApis: readonly RenderRequestApiObservation[];
+}>;
+
+export type ClassifyCacheVariantDimensionDowngradeInput = Pick<
+  CacheVariantDimensionInput,
+  "source"
+>;
+
 export type RenderObservation = Readonly<{
   boundaryOutcome: BoundaryOutcome;
   cacheTags: readonly string[];
   cacheability: RenderCacheability;
   completeness: RenderObservationCompleteness;
+  downgrade: CacheProofDowngradeClassification;
   dynamicFetches: readonly string[];
   output: CacheProofOutputScope;
   pathTags: readonly string[];
@@ -592,7 +675,7 @@ export function buildCacheVariant(input: BuildCacheVariantInput): BuildCacheVari
     kind: "variant",
     variant: {
       schemaVersion: CACHE_PROOF_MODEL_SCHEMA_VERSION,
-      cacheKey: `cp0:${fnv1a64(encoded)}`,
+      cacheKey: `cp${CACHE_PROOF_MODEL_SCHEMA_VERSION}:${fnv1a64(encoded)}`,
       output: input.output,
       dimensions,
       encodedLength: encoded.length,
@@ -697,6 +780,239 @@ function normalizeRequestApiObservations(
     .map(([kind, status]) => ({ kind, status }));
 }
 
+function cacheProofDowngradeTargetRank(target: CacheProofDowngradeTarget): number {
+  switch (target) {
+    case "public":
+      return 0;
+    case "publicVariant":
+      return 1;
+    case "private":
+      return 2;
+    case "privateUncacheable":
+      return 3;
+    case "freshRender":
+      return 4;
+    default:
+      return assertNever(target);
+  }
+}
+
+function maxCacheProofDowngradeTarget(
+  current: CacheProofDowngradeTarget,
+  candidate: CacheProofDowngradeTarget,
+): CacheProofDowngradeTarget {
+  return cacheProofDowngradeTargetRank(candidate) > cacheProofDowngradeTargetRank(current)
+    ? candidate
+    : current;
+}
+
+function createDowngradeFallback(
+  target: CacheProofDowngradeTarget,
+  reasons: readonly CacheProofDowngradeReason[],
+): CacheProofBreakerFallback | null {
+  switch (target) {
+    case "public":
+    case "publicVariant":
+    case "private":
+      return null;
+    case "privateUncacheable":
+      return buildBreakerFallback(
+        "CP_PRIVATE_DYNAMIC_DOWNGRADE",
+        {
+          reasonCodes: reasons.map((reason) => reason.code),
+          target,
+        },
+        "privateUncacheable",
+      );
+    case "freshRender":
+      return buildBreakerFallback("CP_PRIVATE_DYNAMIC_DOWNGRADE", {
+        reasonCodes: reasons.map((reason) => reason.code),
+        target,
+      });
+    default:
+      return assertNever(target);
+  }
+}
+
+function classifyObservedRequestApiDowngrade(
+  kind: RenderRequestApiKind,
+): CacheProofDowngradeReason {
+  switch (kind) {
+    case "connection":
+      return {
+        code: "CP_DOWNGRADE_DYNAMIC_REQUEST_API",
+        requestApi: "connection",
+        target: "freshRender",
+      };
+    case "cookies":
+      return {
+        code: "CP_DOWNGRADE_PRIVATE_REQUEST_API",
+        requestApi: "cookies",
+        target: "private",
+      };
+    case "draftMode":
+      return {
+        code: "CP_DOWNGRADE_DRAFT_MODE",
+        requestApi: "draftMode",
+        target: "privateUncacheable",
+      };
+    case "headers":
+      return {
+        code: "CP_DOWNGRADE_PRIVATE_REQUEST_API",
+        requestApi: "headers",
+        target: "private",
+      };
+    case "params":
+      return {
+        code: "CP_DOWNGRADE_PUBLIC_REQUEST_API",
+        requestApi: "params",
+        target: "publicVariant",
+      };
+    case "searchParams":
+      return {
+        code: "CP_DOWNGRADE_PUBLIC_REQUEST_API",
+        requestApi: "searchParams",
+        target: "publicVariant",
+      };
+    default:
+      return assertNever(kind);
+  }
+}
+
+export function classifyCacheVariantDimensionDowngrade(
+  input: ClassifyCacheVariantDimensionDowngradeInput,
+): CacheProofDowngradeReason | null {
+  switch (input.source) {
+    case "auth":
+      return {
+        code: "CP_DOWNGRADE_PRIVATE_DIMENSION",
+        inputClass: "auth",
+        source: "auth",
+        target: "private",
+      };
+    case "cookie":
+      return {
+        code: "CP_DOWNGRADE_PRIVATE_DIMENSION",
+        inputClass: "private",
+        source: "cookie",
+        target: "private",
+      };
+    case "draft-mode":
+      return {
+        code: "CP_DOWNGRADE_PRIVATE_DIMENSION",
+        inputClass: "draft",
+        source: "draft-mode",
+        target: "privateUncacheable",
+      };
+    case "header":
+      return {
+        code: "CP_DOWNGRADE_PRIVATE_DIMENSION",
+        inputClass: "private",
+        source: "header",
+        target: "private",
+      };
+    case "session":
+      return {
+        code: "CP_DOWNGRADE_PRIVATE_DIMENSION",
+        inputClass: "session",
+        source: "session",
+        target: "private",
+      };
+    case "custom":
+    case "interception":
+    case "mounted-slots":
+    case "params":
+    case "route":
+    case "search":
+      return null;
+    default:
+      return assertNever(input.source);
+  }
+}
+
+export function classifyRenderObservationDowngrade(
+  input: ClassifyRenderObservationDowngradeInput,
+): CacheProofDowngradeClassification {
+  const reasons: CacheProofDowngradeReason[] = [];
+  let target: CacheProofDowngradeTarget = "public";
+
+  switch (input.cacheability) {
+    case "public":
+      break;
+    case "private": {
+      const reason = {
+        code: "CP_DOWNGRADE_CACHEABILITY_PRIVATE",
+        target: "private",
+      } satisfies CacheProofDowngradeReason;
+      reasons.push(reason);
+      target = maxCacheProofDowngradeTarget(target, reason.target);
+      break;
+    }
+    case "uncacheable": {
+      const reason = {
+        code: "CP_DOWNGRADE_CACHEABILITY_UNCACHEABLE",
+        target: "privateUncacheable",
+      } satisfies CacheProofDowngradeReason;
+      reasons.push(reason);
+      target = maxCacheProofDowngradeTarget(target, reason.target);
+      break;
+    }
+    case "unknown": {
+      const reason = {
+        code: "CP_DOWNGRADE_CACHEABILITY_UNKNOWN",
+        target: "freshRender",
+      } satisfies CacheProofDowngradeReason;
+      reasons.push(reason);
+      target = maxCacheProofDowngradeTarget(target, reason.target);
+      break;
+    }
+    default:
+      assertNever(input.cacheability);
+  }
+
+  if (input.completeness !== "complete") {
+    const reason = {
+      code: "CP_DOWNGRADE_INCOMPLETE_OBSERVATION",
+      completeness: input.completeness,
+      target: "freshRender",
+    } satisfies CacheProofDowngradeReason;
+    reasons.push(reason);
+    target = maxCacheProofDowngradeTarget(target, reason.target);
+  }
+
+  if (input.dynamicFetches.length > 0) {
+    const reason = {
+      code: "CP_DOWNGRADE_DYNAMIC_FETCH",
+      dynamicFetchCount: input.dynamicFetches.length,
+      target: "freshRender",
+    } satisfies CacheProofDowngradeReason;
+    reasons.push(reason);
+    target = maxCacheProofDowngradeTarget(target, reason.target);
+  }
+
+  const requestApis = normalizeRequestApiObservations(input.requestApis);
+  for (const requestApi of requestApis) {
+    if (requestApi.status === "notObserved") continue;
+    const reason =
+      requestApi.status === "unknown"
+        ? ({
+            code: "CP_DOWNGRADE_UNKNOWN_REQUEST_API",
+            requestApi: requestApi.kind,
+            target: "freshRender",
+          } satisfies CacheProofDowngradeReason)
+        : classifyObservedRequestApiDowngrade(requestApi.kind);
+    reasons.push(reason);
+    target = maxCacheProofDowngradeTarget(target, reason.target);
+  }
+
+  return {
+    target,
+    reasons,
+    fallback: createDowngradeFallback(target, reasons),
+    isPublicCacheCandidate: target === "public" || target === "publicVariant",
+  };
+}
+
 export function buildRenderRequestApiObservations(
   input: BuildRenderRequestApiObservationsInput,
 ): RenderRequestApiObservation[] {
@@ -711,16 +1027,25 @@ export function buildRenderRequestApiObservations(
 }
 
 export function buildRenderObservation(input: BuildRenderObservationInput): RenderObservation {
+  const requestApis = normalizeRequestApiObservations(input.requestApis);
+  const dynamicFetches = sortedUniqueRedacted(input.dynamicFetches);
+
   return {
     schemaVersion: CACHE_PROOF_MODEL_SCHEMA_VERSION,
     output: input.output,
     completeness: input.completeness,
     boundaryOutcome: input.boundaryOutcome,
-    requestApis: normalizeRequestApiObservations(input.requestApis),
-    dynamicFetches: sortedUniqueRedacted(input.dynamicFetches),
+    requestApis,
+    dynamicFetches,
     cacheTags: sortedUnique(input.cacheTags),
     pathTags: sortedUnique(input.pathTags),
     cacheability: input.cacheability,
+    downgrade: classifyRenderObservationDowngrade({
+      cacheability: input.cacheability,
+      completeness: input.completeness,
+      dynamicFetches,
+      requestApis,
+    }),
   };
 }
 

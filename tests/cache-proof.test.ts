@@ -3,6 +3,9 @@ import {
   buildBoundaryOutcomeCompatibility,
   buildCacheVariant,
   buildRenderObservation,
+  CACHE_PROOF_MODEL_SCHEMA_VERSION,
+  classifyCacheVariantDimensionDowngrade,
+  classifyRenderObservationDowngrade,
   createAppRouteCacheProofGraphScope,
   createDisabledCacheProofDecision,
   DEFAULT_CACHE_VARIANT_BUDGET,
@@ -118,6 +121,8 @@ describe("disabled cache proof model", () => {
     }
 
     expect(first.variant.cacheKey).toBe(second.variant.cacheKey);
+    expect(first.variant.cacheKey.startsWith(`cp${CACHE_PROOF_MODEL_SCHEMA_VERSION}:`)).toBe(true);
+    expect(first.variant.schemaVersion).toBe(CACHE_PROOF_MODEL_SCHEMA_VERSION);
     expect(first.variant.dimensions.map((dimension) => dimension.name)).toEqual(["id", "sort"]);
     expect(first.variant.dimensions[0].valueHashes).toHaveLength(1);
     expect(first.variant.dimensions[1].valueHashes).toHaveLength(2);
@@ -369,5 +374,158 @@ describe("disabled cache proof model", () => {
         scope: "affectedOutput",
       },
     });
+  });
+
+  it("classifies public request observations as public variant dimensions", () => {
+    const observation = buildRenderObservation({
+      boundaryOutcome: { kind: "success" },
+      cacheability: "public",
+      cacheTags: [],
+      completeness: "complete",
+      dynamicFetches: [],
+      output: {
+        kind: "app-html",
+        renderEpoch: null,
+        rootBoundaryId: "layout:/",
+        routeId: "route:/products/:id",
+      },
+      pathTags: ["/products/1"],
+      requestApis: [
+        { kind: "params", status: "observed" },
+        { kind: "searchParams", status: "observed" },
+      ],
+    });
+
+    expect(observation.downgrade).toEqual(classifyRenderObservationDowngrade(observation));
+    expect(observation.downgrade).toMatchObject({
+      isPublicCacheCandidate: true,
+      target: "publicVariant",
+      fallback: null,
+    });
+    expect(observation.downgrade.reasons.map((reason) => reason.code)).toEqual([
+      "CP_DOWNGRADE_PUBLIC_REQUEST_API",
+      "CP_DOWNGRADE_PUBLIC_REQUEST_API",
+    ]);
+  });
+
+  it("classifies private auth draft and session dimensions without enabling public reuse", () => {
+    expect(classifyCacheVariantDimensionDowngrade({ source: "auth" })).toEqual({
+      code: "CP_DOWNGRADE_PRIVATE_DIMENSION",
+      inputClass: "auth",
+      source: "auth",
+      target: "private",
+    });
+    expect(classifyCacheVariantDimensionDowngrade({ source: "session" })).toEqual({
+      code: "CP_DOWNGRADE_PRIVATE_DIMENSION",
+      inputClass: "session",
+      source: "session",
+      target: "private",
+    });
+    expect(classifyCacheVariantDimensionDowngrade({ source: "draft-mode" })).toEqual({
+      code: "CP_DOWNGRADE_PRIVATE_DIMENSION",
+      inputClass: "draft",
+      source: "draft-mode",
+      target: "privateUncacheable",
+    });
+    expect(classifyCacheVariantDimensionDowngrade({ source: "cookie" })).toEqual({
+      code: "CP_DOWNGRADE_PRIVATE_DIMENSION",
+      inputClass: "private",
+      source: "cookie",
+      target: "private",
+    });
+    expect(classifyCacheVariantDimensionDowngrade({ source: "header" })).toEqual({
+      code: "CP_DOWNGRADE_PRIVATE_DIMENSION",
+      inputClass: "private",
+      source: "header",
+      target: "private",
+    });
+    expect(classifyCacheVariantDimensionDowngrade({ source: "params" })).toBeNull();
+    expect(classifyCacheVariantDimensionDowngrade({ source: "search" })).toBeNull();
+  });
+
+  it("classifies private request API observations away from public cache", () => {
+    const observation = buildRenderObservation({
+      boundaryOutcome: { kind: "success" },
+      cacheability: "public",
+      cacheTags: [],
+      completeness: "complete",
+      dynamicFetches: [],
+      output: {
+        kind: "app-rsc",
+        mountedSlotsFingerprint: null,
+        renderEpoch: null,
+        rootBoundaryId: "layout:/",
+        routeId: "route:/account",
+      },
+      pathTags: ["/account"],
+      requestApis: [
+        { kind: "cookies", status: "observed" },
+        { kind: "draftMode", status: "observed" },
+        { kind: "headers", status: "observed" },
+      ],
+    });
+
+    expect(observation.downgrade).toMatchObject({
+      isPublicCacheCandidate: false,
+      target: "privateUncacheable",
+      fallback: {
+        code: "CP_PRIVATE_DYNAMIC_DOWNGRADE",
+        mode: "privateUncacheable",
+        scope: "affectedOutput",
+      },
+    });
+    expect(observation.downgrade.reasons).toEqual([
+      {
+        code: "CP_DOWNGRADE_PRIVATE_REQUEST_API",
+        requestApi: "cookies",
+        target: "private",
+      },
+      {
+        code: "CP_DOWNGRADE_DRAFT_MODE",
+        requestApi: "draftMode",
+        target: "privateUncacheable",
+      },
+      {
+        code: "CP_DOWNGRADE_PRIVATE_REQUEST_API",
+        requestApi: "headers",
+        target: "private",
+      },
+    ]);
+  });
+
+  it("classifies dynamic and incomplete observations as fresh-render downgrades", () => {
+    const observation = buildRenderObservation({
+      boundaryOutcome: { kind: "success" },
+      cacheability: "unknown",
+      cacheTags: [],
+      completeness: "partial",
+      dynamicFetches: ["https://api.example.test/live?token=secret"],
+      output: {
+        kind: "app-rsc",
+        mountedSlotsFingerprint: null,
+        renderEpoch: null,
+        rootBoundaryId: "layout:/",
+        routeId: "route:/live",
+      },
+      pathTags: ["/live"],
+      requestApis: [{ kind: "connection", status: "observed" }],
+    });
+
+    expect(observation.downgrade).toMatchObject({
+      isPublicCacheCandidate: false,
+      target: "freshRender",
+      fallback: {
+        code: "CP_PRIVATE_DYNAMIC_DOWNGRADE",
+        mode: "renderFresh",
+        scope: "affectedOutput",
+      },
+    });
+    expect(observation.downgrade.reasons.map((reason) => reason.code)).toEqual([
+      "CP_DOWNGRADE_CACHEABILITY_UNKNOWN",
+      "CP_DOWNGRADE_INCOMPLETE_OBSERVATION",
+      "CP_DOWNGRADE_DYNAMIC_FETCH",
+      "CP_DOWNGRADE_DYNAMIC_REQUEST_API",
+    ]);
+    expect(JSON.stringify(observation.downgrade)).not.toContain("secret");
   });
 });
