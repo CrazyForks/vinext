@@ -13,6 +13,7 @@
  * in production and warn in development, matching Next.js behavior.
  */
 import React, { forwardRef, useEffect, useLayoutEffect, useRef, useState } from "react";
+import * as ReactDOM from "react-dom";
 import { Image as UnpicImage } from "@unpic/react";
 import { hasRemoteMatch, isPrivateIp, type RemotePattern } from "./image-config.js";
 import { useMergedRef } from "./use-merged-ref.js";
@@ -167,6 +168,7 @@ type ImageProps = {
   width?: number;
   height?: number;
   fill?: boolean;
+  preload?: boolean;
   priority?: boolean;
   quality?: number;
   placeholder?: "blur" | "empty";
@@ -272,6 +274,23 @@ export function imageOptimizationUrl(src: string, width: number, quality: number
   return `/_vinext/image?url=${encodeURIComponent(src)}&w=${width}&q=${quality}`;
 }
 
+function preloadImageResource(input: {
+  shouldPreload: boolean;
+  src: string;
+  srcSet?: string;
+  sizes?: string;
+  fetchPriority?: ReactDOM.PreloadOptions["fetchPriority"];
+}): void {
+  if (!input.shouldPreload) return;
+  if (typeof ReactDOM.preload !== "function") return;
+  ReactDOM.preload(input.src, {
+    as: "image",
+    imageSrcSet: input.srcSet,
+    imageSizes: input.sizes,
+    fetchPriority: input.fetchPriority,
+  });
+}
+
 /**
  * Generate a srcSet string for responsive images.
  *
@@ -293,6 +312,7 @@ const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
     width,
     height,
     fill,
+    preload,
     priority,
     quality,
     placeholder,
@@ -358,6 +378,10 @@ const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
     height: imgHeight,
     blurDataURL: imgBlurDataURL,
   } = resolveImageSource({ src: srcProp, width, height, blurDataURL });
+  const shouldPreload = preload === true || priority === true;
+  const priorityFetchPriority = priority ? "high" : undefined;
+  const imageLoading = priority ? "eager" : shouldPreload ? loading : (loading ?? "lazy");
+
   const [completedBlurSrc, setCompletedBlurSrc] = useState<string | undefined>(undefined);
   const blurComplete = completedBlurSrc === src;
 
@@ -446,6 +470,12 @@ const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
   // If a custom loader is provided, use basic img with loader URL
   if (loader) {
     const resolvedSrc = loader({ src, width: imgWidth ?? 0, quality: quality ?? 75 });
+    preloadImageResource({
+      shouldPreload,
+      src: resolvedSrc,
+      sizes,
+      fetchPriority: priorityFetchPriority,
+    });
     return (
       <img
         ref={mergedRef}
@@ -453,7 +483,7 @@ const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
         alt={alt}
         width={fill ? undefined : imgWidth}
         height={fill ? undefined : imgHeight}
-        loading={priority ? "eager" : (loading ?? "lazy")}
+        loading={imageLoading}
         decoding="async"
         sizes={sizes}
         className={className}
@@ -494,15 +524,26 @@ const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
     const bg = showBlur ? `url(${sanitizedBlur})` : undefined;
 
     if (fill) {
+      const fillSizes = sizes ?? "100vw";
+      preloadImageResource({
+        shouldPreload,
+        src,
+        sizes: fillSizes,
+        fetchPriority: priorityFetchPriority,
+      });
       return (
         <img
           ref={mergedRef}
           src={src}
           alt={alt}
-          loading={priority ? "eager" : (loading ?? "lazy")}
-          fetchPriority={priority ? "high" : undefined}
+          // `priority` is a Next.js concept — translate it to HTML attributes so
+          // it is never forwarded to the DOM as a non-boolean attribute, which
+          // would trigger React's "Received `true` for a non-boolean attribute"
+          // warning.
+          loading={imageLoading}
+          fetchPriority={priorityFetchPriority}
           decoding="async"
-          sizes={sizes ?? "100vw"}
+          sizes={fillSizes}
           className={className}
           data-nimg="fill"
           onLoad={handleLoad}
@@ -514,6 +555,12 @@ const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
     }
     // constrained layout requires width+height or aspectRatio
     if (imgWidth && imgHeight) {
+      preloadImageResource({
+        shouldPreload,
+        src,
+        sizes,
+        fetchPriority: priorityFetchPriority,
+      });
       return (
         <UnpicImage
           src={src}
@@ -522,8 +569,8 @@ const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
           height={imgHeight}
           layout="constrained"
           // Same translation as above — never pass `priority` to the DOM.
-          loading={priority ? "eager" : (loading ?? "lazy")}
-          fetchPriority={priority ? "high" : undefined}
+          loading={imageLoading}
+          fetchPriority={priorityFetchPriority}
           sizes={sizes}
           className={className}
           background={bg}
@@ -579,6 +626,15 @@ const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
         }
       : undefined;
 
+  const imageSizes = sizes ?? (fill ? "100vw" : undefined);
+  preloadImageResource({
+    shouldPreload,
+    src: optimizedSrc,
+    srcSet,
+    sizes: imageSizes,
+    fetchPriority: priorityFetchPriority,
+  });
+
   // For local images, render a standard <img> tag with srcSet and blur support.
   // The src and srcSet point to the /_vinext/image optimization endpoint.
   return (
@@ -588,11 +644,11 @@ const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
       alt={alt}
       width={fill ? undefined : imgWidth}
       height={fill ? undefined : imgHeight}
-      loading={priority ? "eager" : (loading ?? "lazy")}
-      fetchPriority={priority ? "high" : undefined}
+      loading={imageLoading}
+      fetchPriority={priorityFetchPriority}
       decoding="async"
       srcSet={srcSet}
-      sizes={sizes ?? (fill ? "100vw" : undefined)}
+      sizes={imageSizes}
       className={className}
       data-nimg={fill ? "fill" : "1"}
       onLoad={handleLoad}
@@ -616,6 +672,7 @@ export function getImageProps(props: ImageProps): {
     width,
     height,
     fill,
+    preload: _preload,
     priority,
     quality: _quality,
     placeholder,
@@ -638,6 +695,7 @@ export function getImageProps(props: ImageProps): {
     height: imgHeight,
     blurDataURL: imgBlurDataURL,
   } = resolveImageSource({ src: srcProp, width, height, blurDataURL: blurDataURLProp });
+  const shouldPreload = _preload === true || priority === true;
 
   // Validate remote URLs against configured patterns
   let blockedInProd = false;
@@ -701,7 +759,7 @@ export function getImageProps(props: ImageProps): {
       alt,
       width: fill ? undefined : imgWidth,
       height: fill ? undefined : imgHeight,
-      loading: priority ? "eager" : (loading ?? "lazy"),
+      loading: priority ? "eager" : shouldPreload ? loading : (loading ?? "lazy"),
       fetchPriority: priority ? ("high" as const) : undefined,
       decoding: "async" as const,
       srcSet,

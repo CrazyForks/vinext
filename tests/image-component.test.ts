@@ -44,7 +44,7 @@ describe("Image SSR rendering", () => {
     expect(html).toContain('data-nimg="1"');
   });
 
-  it("renders with priority (eager loading + fetchpriority)", () => {
+  it("renders with priority (preload + eager loading + fetchpriority)", () => {
     const html = ReactDOMServer.renderToString(
       React.createElement(Image, {
         alt: "priority image",
@@ -54,9 +54,34 @@ describe("Image SSR rendering", () => {
         priority: true,
       }),
     );
+    // Ported from Next.js:
+    // .nextjs-ref/test/e2e/next-image-new/app-dir/app-dir-static.test.ts
+    // .nextjs-ref/packages/next/src/client/image-component.tsx
+    expect(html).toContain('<link rel="preload"');
+    expect(html).toContain('as="image"');
+    expect(html).toContain('fetchPriority="high"');
+    expect(html).toContain(`imageSrcSet="${optUrlHtml("/hero.png", 640)} 640w`);
+    expect(html).not.toContain(`href="${optUrlHtml("/hero.png", 800)}"`);
     expect(html).toContain('loading="eager"');
     expect(html).toContain('fetchPriority="high"');
     expect(html).not.toContain('loading="lazy"');
+  });
+
+  it("renders an image preload for the modern preload prop", () => {
+    const html = ReactDOMServer.renderToString(
+      React.createElement(Image, {
+        alt: "preloaded image",
+        src: "/hero-preload.png",
+        width: 800,
+        height: 600,
+        preload: true,
+      }),
+    );
+    expect(html).toContain('<link rel="preload"');
+    expect(html).toContain('as="image"');
+    expect(html).toContain(`imageSrcSet="${optUrlHtml("/hero-preload.png", 640)} 640w`);
+    expect(html).not.toContain('loading="lazy"');
+    expect(html).not.toContain('fetchPriority="high"');
   });
 
   it("renders fill mode with absolute positioning", () => {
