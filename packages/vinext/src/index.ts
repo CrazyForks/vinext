@@ -79,6 +79,11 @@ import { buildRequestHeadersFromMiddlewareResponse } from "./server/middleware-r
 import { detectPackageManager } from "./utils/project.js";
 import { manifestFileWithBase, manifestFilesWithBase } from "./utils/manifest-paths.js";
 import { hasBasePath, removeTrailingSlash } from "./utils/base-path.js";
+import {
+  ASSET_PREFIX_URL_DIR,
+  resolveAssetUrlPrefix,
+  resolveAssetsDir,
+} from "./utils/asset-prefix.js";
 import { asyncHooksStubPlugin } from "./plugins/async-hooks-stub.js";
 import { clientReferenceDedupPlugin } from "./plugins/client-reference-dedup.js";
 import { createRscClientReferenceLoadersPlugin } from "./plugins/rsc-client-reference-loaders.js";
@@ -1363,6 +1368,19 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             // test/e2e/app-dir/css-media-query/css-media-query.test.ts which
             // asserts `cssText` preserves `max-width: 768px`.
             cssTarget: ["chrome111", "edge111", "firefox114", "safari15"],
+            // Direct Vite to write build output under `<assetPrefix>/_next/static/`
+            // (path-prefix form) or `_next/static/` (absolute-URL form) when
+            // `assetPrefix` is configured. Keeps the default of `assets/`
+            // when no prefix is set so existing on-disk layouts are stable
+            // for projects that haven't opted in.
+            //
+            // Pair with `experimental.renderBuiltUrl` above: the on-disk
+            // layout matches the URL path so the Cloudflare ASSETS binding
+            // and any static file server can resolve `<assetPrefix>/_next/static/...`
+            // requests without a runtime rewrite.
+            ...(nextConfig.assetPrefix
+              ? { assetsDir: resolveAssetsDir(nextConfig.assetPrefix) }
+              : {}),
             ...withBuildBundlerOptions(viteMajorVersion, {
               // Suppress "Module level directives cause errors when bundled"
               // warnings for "use client" / "use server" directives. Our shims
@@ -1519,8 +1537,51 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             : { esbuild: { jsx: "automatic" } }),
           // Define env vars for client bundle
           define: defines,
-          // Set base path if configured
+          // Set base path if configured.
+          //
+          // `base` controls both the dev server URL prefix and the default
+          // asset URL prefix in production. Routes live under `basePath`,
+          // so we anchor `base` there. Asset URLs are then re-prefixed with
+          // `assetPrefix` (when configured) via `experimental.renderBuiltUrl`
+          // below — that keeps `basePath` and `assetPrefix` independent, as
+          // they are in Next.js.
           ...(nextConfig.basePath ? { base: nextConfig.basePath + "/" } : {}),
+          // When `assetPrefix` is configured, override Vite's default
+          // `assetsURL = base + url` behaviour so emitted JS/CSS/asset URLs
+          // start with the configured asset prefix and use Next.js's
+          // canonical `_next/static/` directory convention. We also write
+          // assets to disk under that same path layout (via `build.assetsDir`
+          // below) so the Cloudflare ASSETS binding and any static file
+          // server can serve them without runtime rewrites.
+          //
+          // See packages/vinext/src/utils/asset-prefix.ts for the helpers
+          // and Next.js docs for the contract:
+          // https://nextjs.org/docs/app/api-reference/config/next-config-js/assetPrefix
+          ...(nextConfig.assetPrefix
+            ? {
+                experimental: {
+                  renderBuiltUrl: (filename: string) => {
+                    // `filename` is the bundler-relative output path,
+                    // e.g. `_next/static/chunk-abc.js` or
+                    // `<assetPrefix-pathname>/_next/static/chunk-abc.js`
+                    // when assetPrefix is a path prefix. Re-anchor it under
+                    // the configured asset URL prefix.
+                    const urlPrefix = resolveAssetUrlPrefix(nextConfig.assetPrefix);
+                    // Strip any leading on-disk `assetsDir` segment so we
+                    // don't double-prefix when the on-disk layout already
+                    // mirrors the URL path.
+                    const onDiskDir = resolveAssetsDir(nextConfig.assetPrefix);
+                    const dirPrefix = onDiskDir + "/";
+                    const stripped = filename.startsWith(dirPrefix)
+                      ? filename.slice(dirPrefix.length)
+                      : filename.startsWith(`${ASSET_PREFIX_URL_DIR}/`)
+                        ? filename.slice(ASSET_PREFIX_URL_DIR.length + 1)
+                        : filename;
+                    return urlPrefix + stripped;
+                  },
+                },
+              }
+            : {}),
           // Inject resolved PostCSS plugins (when found) and any
           // sassOptions translated from next.config. Both end up on
           // `css.*`, so we merge them into a single `css` object rather
@@ -2079,6 +2140,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               allowedOrigins: nextConfig?.serverActionsAllowedOrigins,
               allowedDevOrigins: nextConfig?.allowedDevOrigins,
               bodySizeLimit: nextConfig?.serverActionsBodySizeLimit,
+              assetPrefix: nextConfig?.assetPrefix,
               expireTime: nextConfig?.expireTime,
               i18n: nextConfig?.i18n,
               hasPagesDir,
@@ -3716,7 +3778,11 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
 
             // Only precompress hashed assets — public directory files use
             // on-the-fly compression since they may change between deploys.
-            const assetsDir = path.join(outDir, "assets");
+            // When `assetPrefix` is configured the assets live under a
+            // different subdirectory (e.g. `cdn/_next/static/`); resolve from
+            // the config so we walk the actual on-disk layout.
+            const assetsSubdir = resolveAssetsDir(nextConfig.assetPrefix);
+            const assetsDir = path.join(outDir, assetsSubdir);
             if (!fs.existsSync(assetsDir)) return;
 
             const isTTY = process.stderr.isTTY;
@@ -3728,16 +3794,19 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             // the full precompression cost on the critical path of step 4/5.
             pendingPrecompressError = null;
             pendingPrecompress = (async () => {
-              const result = await precompressAssets(outDir, (completed, total, file) => {
-                if (!isTTY) return;
-                const pct = total > 0 ? Math.floor((completed / total) * 100) : 0;
-                const bar = `[${"█".repeat(Math.floor(pct / 5))}${" ".repeat(20 - Math.floor(pct / 5))}]`;
-                const maxFile = 30;
-                const fileLabel = file.length > maxFile ? "…" + file.slice(-(maxFile - 1)) : file;
-                const line = `Compressing assets... ${bar} ${String(completed).padStart(String(total).length)}/${total} ${fileLabel}`;
-                const padded = line.padEnd(lastLineLen);
-                lastLineLen = line.length;
-                process.stderr.write(`\r${padded}`);
+              const result = await precompressAssets(outDir, {
+                assetsDir: assetsSubdir,
+                onProgress: (completed, total, file) => {
+                  if (!isTTY) return;
+                  const pct = total > 0 ? Math.floor((completed / total) * 100) : 0;
+                  const bar = `[${"█".repeat(Math.floor(pct / 5))}${" ".repeat(20 - Math.floor(pct / 5))}]`;
+                  const maxFile = 30;
+                  const fileLabel = file.length > maxFile ? "…" + file.slice(-(maxFile - 1)) : file;
+                  const line = `Compressing assets... ${bar} ${String(completed).padStart(String(total).length)}/${total} ${fileLabel}`;
+                  const padded = line.padEnd(lastLineLen);
+                  lastLineLen = line.length;
+                  process.stderr.write(`\r${padded}`);
+                },
               });
               if (isTTY) {
                 process.stderr.write(`\r${" ".repeat(lastLineLen)}\r`);
@@ -3886,11 +3955,19 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             const workerEntry = path.join(workerOutDir, "index.js");
             if (!fs.existsSync(workerEntry)) return;
 
-            // Fallback: scan dist/client/assets/ for the client entry chunk.
-            // Pages Router uses "vinext-client-entry", App Router uses
-            // "vinext-app-browser-entry".
+            // Fallback: scan the on-disk assets directory for the client entry
+            // chunk when the SSR manifest lookup didn't surface one. Pages Router
+            // uses "vinext-client-entry", App Router uses "vinext-app-browser-entry".
+            //
+            // When `assetPrefix` is configured, chunks live under
+            // `<prefix>/_next/static/` (path-prefix) or `_next/static/`
+            // (absolute-URL prefix) — NOT `assets/`. Resolve the actual
+            // subdirectory from the same helper that drives `build.assetsDir`
+            // and the prod-server lookup path, so this fallback works for every
+            // layout supported by the rest of the pipeline.
             if (!clientEntryFile) {
-              const assetsDir = path.join(clientDir, "assets");
+              const assetsSubdir = resolveAssetsDir(nextConfig?.assetPrefix);
+              const assetsDir = path.join(clientDir, assetsSubdir);
               if (fs.existsSync(assetsDir)) {
                 const files = fs.readdirSync(assetsDir);
                 const entry = files.find(
@@ -3898,7 +3975,8 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                     (f.includes("vinext-client-entry") || f.includes("vinext-app-browser-entry")) &&
                     f.endsWith(".js"),
                 );
-                if (entry) clientEntryFile = manifestFileWithBase("assets/" + entry, clientBase);
+                if (entry)
+                  clientEntryFile = manifestFileWithBase(`${assetsSubdir}/${entry}`, clientBase);
               }
             }
 
