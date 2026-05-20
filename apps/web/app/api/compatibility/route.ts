@@ -4,10 +4,14 @@
  * Ingests a compatibility test run. Called from the Next.js deploy-suite
  * GitHub Actions workflow (and any future compat suites).
  *
+ * This endpoint only carries result counts. Router classification is
+ * submitted separately via POST /api/compatibility/classify so that
+ * classification updates aren't coupled to test runs (e.g. an override
+ * fix or a Next.js ref bump can re-classify everything without re-running
+ * the suite, and a fresh classification is available even when tests fail).
+ *
  * Auth: requires `X-Compat-Secret` header matching the `COMPAT_INGEST_SECRET`
- * worker secret (set via `wrangler secret put COMPAT_INGEST_SECRET`). The
- * comparison is constant-time to avoid leaking timing information about
- * the secret's prefix on a low-latency edge runtime.
+ * worker secret (set via `wrangler secret put COMPAT_INGEST_SECRET`).
  *
  * Body:
  *   {
@@ -17,7 +21,7 @@
  *     nextRef?: string,
  *     commitSha?: string,
  *     files: Array<{
- *       suite: string,        // test file path
+ *       suite: string,        // test file path; joins to compat_suite_meta.suite
  *       total: number,
  *       passed: number,
  *       failed: number,
@@ -28,9 +32,10 @@
  * `status` per file is derived: all-pass => "pass", all-fail (or any-fail with
  * 0 pass) => "fail", mixed => "partial", all-skip/zero => "skip".
  */
-import { getDb, getIngestSecret } from "@/app/lib/db/client";
+import { getDb } from "@/app/lib/db/client";
 import { compatRuns, compatFileResults, type FileStatus } from "@/app/lib/db/schema";
 import { eq } from "drizzle-orm";
+import { requireIngestAuth } from "./_auth";
 
 type SubmitFile = {
   suite: string;
@@ -82,42 +87,9 @@ function isValidBody(body: unknown): body is SubmitBody {
   return true;
 }
 
-/**
- * Constant-time string comparison. Avoids leaking secret length / prefix
- * via timing differences in `!==`. Workers expose `crypto.subtle` but not
- * Node's `crypto.timingSafeEqual`, so we hand-roll a fixed-cost compare.
- *
- * Inputs are first run through SHA-256 to normalise length (otherwise an
- * attacker could distinguish "wrong-length" from "wrong-content" via the
- * fast-path check). HMAC isn't necessary here because both sides go
- * through the same hash with no key.
- */
-async function safeEqual(a: string, b: string): Promise<boolean> {
-  const enc = new TextEncoder();
-  const [ha, hb] = await Promise.all([
-    crypto.subtle.digest("SHA-256", enc.encode(a)),
-    crypto.subtle.digest("SHA-256", enc.encode(b)),
-  ]);
-  const ua = new Uint8Array(ha);
-  const ub = new Uint8Array(hb);
-  let diff = 0;
-  for (let i = 0; i < ua.length; i++) diff |= ua[i] ^ ub[i];
-  return diff === 0;
-}
-
 export async function POST(request: Request): Promise<Response> {
-  const expected = getIngestSecret();
-  if (!expected) {
-    return Response.json(
-      { error: "COMPAT_INGEST_SECRET is not configured on the worker" },
-      { status: 503 },
-    );
-  }
-
-  const provided = request.headers.get("x-compat-secret") ?? "";
-  if (!(await safeEqual(provided, expected))) {
-    return Response.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const denied = await requireIngestAuth(request);
+  if (denied) return denied;
 
   let body: unknown;
   try {
