@@ -15,7 +15,8 @@ import { normalizePageExtensions } from "../routing/file-matcher.js";
 import { getHtmlLimitedBotRegex } from "../utils/html-limited-bots.js";
 import { isUnknownRecord } from "../utils/record.js";
 import { applyLocaleToRoutes, isExternalUrl } from "./config-matchers.js";
-import { loadTsconfigPathAliasesForRoot } from "./tsconfig-paths.js";
+import { loadTsconfigResolutionForRoot } from "./tsconfig-paths.js";
+import { getViteMajorVersion } from "../utils/vite-version.js";
 
 /**
  * Parse a body size limit value (string or number) into bytes.
@@ -812,13 +813,22 @@ export async function loadNextConfig(
   if (!configPath) return null;
 
   const filename = path.basename(configPath);
+  const isTypeScriptConfig = /\.[cm]?ts$/.test(configPath);
 
   // Mirror Next.js: read `compilerOptions.paths` from the project's
   // tsconfig.json so aliased imports inside next.config.ts (e.g.
   // `import { foo } from '@/foo'`) resolve at config-load time. Next.js
-  // passes these to SWC; we pass them to Vite's resolver as `resolve.alias`.
+  // passes `paths` and `baseUrl` to SWC; we thread both into Vite's resolver.
   // See packages/next/src/build/next-config-ts/transpile-config.ts.
-  const tsconfigAliases = loadTsconfigPathAliasesForRoot(root);
+  const tsconfigResolution = loadTsconfigResolutionForRoot(root);
+  const tsconfigBaseUrl = isTypeScriptConfig ? tsconfigResolution.baseUrl : null;
+
+  // Vite 8 (Rolldown) resolves tsconfig `baseUrl` bare imports natively via
+  // `resolve.tsconfigPaths` (oxc-resolver). Vite 7 has no equivalent option,
+  // so baseUrl-based imports in `next.config.ts` are a documented Vite 7/8
+  // capability gap (see docs). `paths` aliases still work on both via
+  // `resolve.alias`. Mirrors the Vite-major gate used in index.ts.
+  const useNativeTsconfigPaths = !!tsconfigBaseUrl && getViteMajorVersion() >= 8;
 
   // Symlink-resolved config path, used by the `commonjs()` filter below to
   // exclude the config file itself. macOS uses /private/var symlinks, so
@@ -832,8 +842,32 @@ export async function loadNextConfig(
       root,
       logLevel: "error",
       clearScreen: false,
+      ...(useNativeTsconfigPaths
+        ? {
+            environments: {
+              inline: {
+                resolve: {
+                  // Vite's module runner externalizes installed bare packages
+                  // before calling resolveId, which would let a package win over
+                  // a baseUrl-local file of the same name. Keep those config
+                  // imports inside the resolver pipeline so the native tsconfig
+                  // resolver gets first lookup, then fall through to packages.
+                  noExternal: true,
+                },
+              },
+            },
+          }
+        : {}),
       resolve: {
-        alias: tsconfigAliases,
+        alias: tsconfigResolution.aliases,
+        // On Vite 8, use native tsconfig resolution (oxc-resolver
+        // `tsconfig: 'auto'`), which mirrors Next.js's SWC `paths` + `baseUrl`
+        // handling: it follows `extends`, resolves baseUrl-local bare imports
+        // before package fallback, and scopes the app baseUrl to project-owned
+        // importers via per-importer tsconfig discovery. Vite 7 has no native
+        // equivalent, so baseUrl bare imports in next.config.ts are unsupported
+        // there (documented gap); `resolve.alias` still covers `paths` aliases.
+        ...(useNativeTsconfigPaths ? { tsconfigPaths: true } : {}),
         // Include `.cjs` and `.cts` so `vite-plugin-commonjs` recognises
         // those extensions (the plugin keys off `config.resolve.extensions`,
         // which on Vite defaults to `[.mjs, .js, .mts, .ts, .jsx, .tsx,
@@ -862,7 +896,7 @@ export async function loadNextConfig(
       // same source produces an `Identifier 'module' has already been
       // declared` syntax error.
       plugins: [
-        ...(/\.[cm]?ts$/.test(configPath) ? [cjsGlobalsInjectorPlugin(configPath)] : []),
+        ...(isTypeScriptConfig ? [cjsGlobalsInjectorPlugin(configPath)] : []),
         commonjs({
           filter: (id: string) => {
             const idPath = id.startsWith("file://") ? fileURLToPath(id) : id.split("?")[0];
