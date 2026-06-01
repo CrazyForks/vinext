@@ -10,6 +10,7 @@ import { getClientTraceMetadataHTML } from "./client-trace-metadata.js";
 import { reportRequestError } from "./instrumentation.js";
 import { loadUserDocumentInitialProps } from "./pages-document-initial-props.js";
 import { readStreamAsText } from "../utils/text-stream.js";
+import { callDocumentGetInitialProps } from "./document-initial-head.js";
 
 type PagesFontPreload = {
   href: string;
@@ -50,6 +51,7 @@ type RenderPagesPageResponseOptions = {
    * head. Undefined or empty disables emission.
    */
   clientTraceMetadata?: readonly string[] | undefined;
+  setDocumentInitialHead?: ((head: ReactNode[]) => void) | undefined;
   gsspRes: PagesGsspResponse | null;
   isrCacheKey: (router: string, pathname: string) => string;
   expireSeconds?: number;
@@ -183,10 +185,11 @@ async function buildPagesShellHtml(
     return html;
   }
 
+  // charset + viewport are emitted via getSSRHeadHTML() (next/head's
+  // defaultHead seeds them with data-next-head=""), matching Next.js's
+  // canonical ordering. Don't duplicate them here.
   return (
     "<!DOCTYPE html>\n<html>\n<head>\n" +
-    '  <meta charset="utf-8" />\n' +
-    '  <meta name="viewport" content="width=device-width, initial-scale=1" />\n' +
     `  ${fontHeadHTML}${options.ssrHeadHTML}\n` +
     `  ${options.assetTags}\n` +
     "</head>\n<body>\n" +
@@ -347,6 +350,13 @@ export async function renderPagesPageResponse(
   // Mirrors Next.js fix: vercel/next.js@9853944
   const bodyStream = await options.renderToReadableStream(pageElement);
 
+  // If the user defined `_document.getInitialProps()`, run it now so any
+  // head tags it returns can join the dedupe pipeline before getSSRHeadHTML
+  // serialises the final <head>. Mirrors Next.js's `_document` contract.
+  // The shared helper also skips the call when the resolved method is the
+  // unmodified default from the shim — see comment in dev-server.ts.
+  await callDocumentGetInitialProps(options.DocumentComponent, options.setDocumentInitialHead);
+
   const headFromShim = options.getSSRHeadHTML?.() ?? "";
   // Trace meta tags from the active OpenTelemetry context. When the
   // allow-list is unset (the common case) or OTel is not installed,
@@ -354,6 +364,7 @@ export async function renderPagesPageResponse(
   // verbatim — keeping the no-op path zero-overhead.
   const traceMetaHTML = getClientTraceMetadataHTML(options.clientTraceMetadata);
   const ssrHeadHTML = traceMetaHTML ? `${headFromShim}\n  ${traceMetaHTML}` : headFromShim;
+
   const shellHtml = await buildPagesShellHtml(bodyMarker, fontHeadHTML, nextDataScript, {
     assetTags: options.assetTags,
     DocumentComponent: options.DocumentComponent,
