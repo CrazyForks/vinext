@@ -80,7 +80,7 @@ import { mergeServerExternalPackages } from "./config/server-external-packages.j
 
 import { findMiddlewareFile, isProxyFile, runMiddleware } from "./server/middleware.js";
 import { isNextDataPathname, parseNextDataPathname } from "./server/pages-data-route.js";
-import { resolvePagesI18nRequest } from "./server/pages-i18n.js";
+import { resolvePagesI18nRequest, stripI18nLocaleForApiRoute } from "./server/pages-i18n.js";
 import {
   MIDDLEWARE_NEXT_HEADER,
   MIDDLEWARE_REWRITE_HEADER,
@@ -4015,11 +4015,16 @@ export const loadServerActionClient = ${
                 res.end("Forbidden");
                 return;
               }
+              const requestHost =
+                (Array.isArray(req.headers.host) ? req.headers.host[0] : req.headers.host) ||
+                "localhost";
+              const requestOrigin = `http://${requestHost}`;
+              const getUrlHostname = (requestUrl: string) => new URL(requestUrl).hostname;
 
               // ── Image optimization passthrough (dev mode) ─────────────
               // In dev, redirect to the original asset URL so Vite serves it.
               if (isImageOptimizationPath(url.split("?")[0]!)) {
-                const imageRequestUrl = new URL(url, `http://${req.headers.host || "localhost"}`);
+                const imageRequestUrl = new URL(url, requestOrigin);
                 const allowedWidths = [
                   ...(nextConfig.images?.deviceSizes ?? DEFAULT_DEVICE_SIZES),
                   ...(nextConfig.images?.imageSizes ?? DEFAULT_IMAGE_SIZES),
@@ -4168,9 +4173,10 @@ export const loadServerActionClient = ${
                 }
               }
 
-              // Skip requests for files with extensions (static assets) after
-              // trailing-slash canonicalization so file-looking dynamic routes
-              // like /catch-all/hello.world/ still get the Next.js redirect.
+              // Skip file-looking requests after trailing-slash canonicalization,
+              // except rewrites and Pages routes that should stay in the pipeline.
+              // This still lets dynamic routes like /catch-all/hello.world/ receive
+              // the same Next.js redirects and route matching as extensionless URLs.
               const filePathMatchesRewrite = [
                 ...(nextConfig?.rewrites.beforeFiles ?? []),
                 ...(nextConfig?.rewrites.afterFiles ?? []),
@@ -4181,11 +4187,32 @@ export const loadServerActionClient = ${
                   hadBasePath: true,
                 }),
               );
-              if (
-                pathname.includes(".") &&
-                !pathname.endsWith(".html") &&
-                !filePathMatchesRewrite
-              ) {
+              const isFilePathRequest = pathname.includes(".") && !pathname.endsWith(".html");
+              let filePathMatchesPagesRoute = false;
+              const requestHostname = getUrlHostname(requestOrigin);
+              if (isFilePathRequest && !filePathMatchesRewrite) {
+                const [pageRoutes, apiRoutes] = await Promise.all([
+                  pagesRouter(pagesDir, nextConfig?.pageExtensions, fileMatcher),
+                  apiRouter(pagesDir, nextConfig?.pageExtensions, fileMatcher),
+                ]);
+                // Page matching follows matchPageRoute's full i18n resolution. API matching
+                // mirrors the shared Pages pipeline lookup, which only strips a locale prefix.
+                const pageRouteUrl = nextConfig?.i18n
+                  ? resolvePagesI18nRequest(
+                      pathname,
+                      nextConfig.i18n,
+                      req.headers,
+                      requestHostname,
+                      bp,
+                      nextConfig.trailingSlash ?? false,
+                    ).url
+                  : pathname;
+                const apiRouteUrl = stripI18nLocaleForApiRoute(pathname, nextConfig?.i18n ?? null);
+                filePathMatchesPagesRoute =
+                  matchRoute(pageRouteUrl, pageRoutes) !== null ||
+                  matchRoute(apiRouteUrl, apiRoutes) !== null;
+              }
+              if (isFilePathRequest && !filePathMatchesRewrite && !filePathMatchesPagesRoute) {
                 return next();
               }
 
@@ -4219,8 +4246,6 @@ export const loadServerActionClient = ${
               for (const header of VINEXT_INTERNAL_HEADERS) {
                 delete req.headers[header];
               }
-
-              const requestOrigin = `http://${req.headers.host || "localhost"}`;
 
               // Build a Web Request for the pipeline (no body — middleware and
               // SSR read req directly). The pipeline only needs the body when
@@ -4260,7 +4285,7 @@ export const loadServerActionClient = ${
                         : "";
                       const mwProto =
                         rawProto === "https" || rawProto === "http" ? rawProto : "http";
-                      const mwOrigin = `${mwProto}://${req.headers.host || "localhost"}`;
+                      const mwOrigin = `${mwProto}://${requestHost}`;
                       const middlewareRequest = new Request(new URL(url, mwOrigin), {
                         method: req.method,
                         headers: nodeRequestHeaders,
@@ -4333,7 +4358,7 @@ export const loadServerActionClient = ${
                         resolvedPathname,
                         nextConfig.i18n,
                         request.headers,
-                        new URL(request.url).hostname,
+                        getUrlHostname(request.url),
                         bp,
                         nextConfig.trailingSlash ?? false,
                       ).url

@@ -1053,6 +1053,17 @@ describe("Pages Router integration", () => {
     expect(data).toEqual({ user: { id: "123", name: "User 123" } });
   });
 
+  // Next.js parity: Pages API routes are matched by the PagesAPIRouteMatcherProvider,
+  // not by a generic file-extension/static-asset preflight.
+  // Source: packages/next/src/server/base-server.ts#getRouteMatchers
+  it("handles dotted dynamic API route segments in dev", async () => {
+    const res = await fetch(`${baseUrl}/api/users/alpha.beta`);
+    expect(res.status).toBe(200);
+
+    const data = await res.json();
+    expect(data).toEqual({ user: { id: "alpha.beta", name: "User alpha.beta" } });
+  });
+
   it("keeps dynamic API route params ahead of same-key query params", async () => {
     const res = await fetch(`${baseUrl}/api/users/123?id=evil`);
     expect(res.status).toBe(200);
@@ -1211,6 +1222,18 @@ describe("Pages Router integration", () => {
     const html = await res.text();
     expect(html).toContain("Docs");
     expect(html).toMatch(/Path:\s*(<!--\s*-->)?\s*getting-started\/install/);
+  });
+
+  // Next.js parity: dynamic page files remain route candidates even when the
+  // requested segment contains a dot; static filesystem outputs are checked as
+  // their own output types in router-utils/filesystem.ts.
+  it("renders dotted dynamic page segments in dev", async () => {
+    const res = await fetch(`${baseUrl}/docs/release/v1.2`);
+    expect(res.status).toBe(200);
+
+    const html = await res.text();
+    expect(html).toContain("Docs");
+    expect(html).toMatch(/Path:\s*(<!--\s*-->)?\s*release\/v1\.2/);
   });
 
   it("renders catch-all routes with single segment", async () => {
@@ -2373,6 +2396,79 @@ export const config = { matcher: "/download.txt" };
 
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("unrelated asset");
+  });
+});
+
+describe("Pages Router dev dot-path i18n preflight", () => {
+  let server: ViteDevServer;
+  let baseUrl: string;
+  let tmpDir: string;
+
+  beforeAll(async () => {
+    tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "vinext-pages-dot-path-i18n-"));
+    await fsp.mkdir(path.join(tmpDir, "pages", "docs"), { recursive: true });
+    await fsp.mkdir(path.join(tmpDir, "pages", "api", "users"), { recursive: true });
+    await fsp.symlink(
+      path.resolve(import.meta.dirname, "../node_modules"),
+      path.join(tmpDir, "node_modules"),
+      "junction",
+    );
+    await fsp.writeFile(
+      path.join(tmpDir, "pages", "docs", "[...slug].tsx"),
+      `export default function Docs({ slug }) {
+  return <div>i18n docs {slug}</div>;
+}
+
+export function getServerSideProps({ params }) {
+  return { props: { slug: params.slug.join("/") } };
+}
+`,
+    );
+    await fsp.writeFile(
+      path.join(tmpDir, "pages", "api", "users", "[id].ts"),
+      `export default function handler(req, res) {
+  res.status(200).json({ id: req.query.id });
+}
+`,
+    );
+    await fsp.writeFile(
+      path.join(tmpDir, "next.config.mjs"),
+      `export default {
+  i18n: {
+    locales: ["en", "fr"],
+    defaultLocale: "en",
+  },
+};
+`,
+    );
+
+    ({ server, baseUrl } = await startFixtureServer(tmpDir));
+  }, 30000);
+
+  afterAll(async () => {
+    await server?.close();
+    await fsp.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  // Next.js parity: filesystem route matching normalizes locale prefixes before
+  // matching dynamic pages. Source: packages/next/src/server/lib/router-utils/filesystem.ts
+  it("keeps locale-prefixed dotted dynamic page segments in the Pages pipeline", async () => {
+    const res = await fetch(`${baseUrl}/fr/docs/release/v1.2`);
+    expect(res.status).toBe(200);
+
+    const html = await res.text();
+    expect(html).toContain("i18n docs");
+    expect(html).toMatch(/release\/v1\.2/);
+  });
+
+  // The shared Pages pipeline strips locale prefixes before API route lookup for
+  // Next.js middleware redirect parity; this dev preflight must mirror that lookup.
+  it("keeps locale-prefixed dotted dynamic API route segments in the Pages pipeline", async () => {
+    const res = await fetch(`${baseUrl}/fr/api/users/alpha.beta`);
+    expect(res.status).toBe(200);
+
+    const data = await res.json();
+    expect(data).toEqual({ id: "alpha.beta" });
   });
 });
 
@@ -5371,6 +5467,23 @@ describe("Production server middleware (Pages Router)", () => {
     expect(res.status).toBe(200);
     // Middleware matcher excludes /api, so no x-custom-middleware header
     expect(res.headers.get("x-custom-middleware")).toBeNull();
+  });
+
+  it("serves dotted dynamic API route segments in production", async () => {
+    const res = await fetch(`${prodUrl}/api/users/alpha.beta`);
+    expect(res.status).toBe(200);
+
+    const data = await res.json();
+    expect(data).toEqual({ user: { id: "alpha.beta", name: "User alpha.beta" } });
+  });
+
+  it("serves dotted dynamic page segments in production", async () => {
+    const res = await fetch(`${prodUrl}/docs/release/v1.2`);
+    expect(res.status).toBe(200);
+
+    const html = await res.text();
+    expect(html).toContain("Docs");
+    expect(html).toMatch(/Path:\s*(<!--\s*-->)?\s*release\/v1\.2/);
   });
 
   it("preserves invalid JSON failures for Pages API routes in production", async () => {
