@@ -1,10 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createRequire } from "node:module";
 import MagicString from "magic-string";
-import { parseSync } from "vite";
 import type { ESTree } from "vite";
 import type { CloudflareInitOptions } from "./init-platform.js";
 import { detectProject } from "./utils/project.js";
+
+const require = createRequire(import.meta.url);
 
 export type CloudflareProjectInfo = {
   root: string;
@@ -580,6 +582,18 @@ type AstObject = ESTree.ObjectExpression & AstNode;
 type AstProperty = Extract<AstObject["properties"][number], { type: "Property" }>;
 
 function parseViteConfig(filePath: string, code: string): ESTree.Program {
+  let parseSync: typeof import("vite").parseSync;
+  try {
+    ({ parseSync } = require("vite") as typeof import("vite"));
+  } catch (error) {
+    const maybeNodeError = error as NodeJS.ErrnoException;
+    if (maybeNodeError.code === "MODULE_NOT_FOUND" && maybeNodeError.message.includes("vite")) {
+      throw new Error(
+        `Could not update ${path.basename(filePath)} because the "vite" package is not available to parse the existing config. Install dependencies first, or remove the existing Vite config and rerun vinext init.`,
+      );
+    }
+    throw error;
+  }
   const extension = path.extname(filePath).slice(1);
   const lang = extension === "ts" || extension === "mts" || extension === "cts" ? "ts" : "js";
   const parsed = parseSync(path.basename(filePath), code, {

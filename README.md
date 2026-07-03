@@ -25,13 +25,15 @@ The skill handles compatibility checking, dependency installation, config genera
 ### Or do it manually
 
 ```bash
-npm install -D vinext vite @vitejs/plugin-react
+npm install vinext
+npm install -D vite @vitejs/plugin-react
 ```
 
 If you're using the App Router, also install:
 
 ```bash
-npm install -D @vitejs/plugin-rsc react-server-dom-webpack
+npm install react-server-dom-webpack
+npm install -D @vitejs/plugin-rsc
 ```
 
 Replace `next` with `vinext` in your scripts:
@@ -93,9 +95,15 @@ Environment variables: `PORT` (default `3000`), `HOST` (default `0.0.0.0`).
 
 ### Starting a new vinext project
 
-Run `npm create next-app@latest` to create a new Next.js project, and then follow these instructions to migrate it to vinext.
+Use `create-vinext-app` for new projects. It creates a TypeScript App Router project
+with Tailwind CSS and then runs the same vinext init setup used for existing apps:
 
-In the future, we will have a proper `npm create vinext` new project workflow.
+```bash
+pnpm create vinext-app@latest my-app
+```
+
+The generated project is Cloudflare Workers-ready by default. Pass
+`--platform=node` if you want the Node target instead.
 
 ### Migrating an existing Next.js project
 
@@ -108,7 +116,7 @@ npx vinext init
 This will:
 
 1. Run `vinext check` to scan for compatibility issues
-2. Install `vite`, `@vitejs/plugin-react`, and App Router-only deps (`@vitejs/plugin-rsc`, `react-server-dom-webpack`) as devDependencies
+2. Install vinext runtime packages as dependencies and Vite/plugin tooling as devDependencies
 3. Rename CJS config files (e.g. `postcss.config.js` -> `.cjs`) to avoid ESM conflicts
 4. Add `"type": "module"` to `package.json`
 5. Add `dev:vinext`, `build:vinext`, and `start:vinext` scripts to `package.json`
@@ -607,7 +615,7 @@ These are intentional exclusions. For things that are missing today but on the r
 - **`next export` (legacy)** — Use `output: 'export'` in config instead.
 - **Turbopack/webpack configuration** — This runs on Vite. Use Vite plugins instead of webpack loaders/plugins.
 - **`next/jest`** — Use Vitest.
-- **`create-next-app` scaffolding** — Not a goal.
+- **`create-next-app` scaffolding** — Use `create-vinext-app` for new vinext projects.
 - **Bug-for-bug parity with undocumented behavior** — If it's not in the Next.js docs, we probably don't replicate it.
 
 ## Known limitations
