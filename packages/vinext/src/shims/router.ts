@@ -921,6 +921,7 @@ type SSRContext = {
   locales?: string[];
   defaultLocale?: string;
   domainLocales?: VinextNextData["domainLocales"];
+  isPreview?: boolean;
   /**
    * True when rendering a `getStaticPaths` fallback shell for a path that
    * hasn't been pre-rendered yet (`fallback: true` + unlisted path). Mirrors
@@ -1956,6 +1957,7 @@ function buildPagesNavigationNextData(
     query: mergedQuery,
     buildId: target.buildId,
     isFallback: false,
+    isPreview: props.__N_PREVIEW === true,
     ...(nextLocale !== undefined ? { locale: nextLocale } : {}),
   } as unknown as NonNullable<Window["__NEXT_DATA__"]> & VinextNextData;
 }
@@ -2153,7 +2155,9 @@ async function navigateClientData(
       const deploymentId = getDeploymentId();
       if (deploymentId) headers[NEXT_DEPLOYMENT_ID_HEADER] = deploymentId;
       const dataFetch =
-        initialTarget.dataKind === "static" ? fetchStaticPagesData : dedupedPagesDataFetch;
+        initialTarget.dataKind === "static" && Router.isPreview !== true
+          ? fetchStaticPagesData
+          : dedupedPagesDataFetch;
       res = await dataFetch(initialTarget.dataHref, {
         headers,
         signal: controller.signal,
@@ -2228,6 +2232,9 @@ async function navigateClientData(
   const rawPageProps = props.pageProps;
   const pageProps: Record<string, unknown> = isUnknownRecord(rawPageProps) ? rawPageProps : {};
   if (initialTarget.dataKind === "server") {
+    evictPagesDataCache(initialTarget.dataHref);
+  }
+  if (props.__N_PREVIEW === true || Router.isPreview === true) {
     evictPagesDataCache(initialTarget.dataHref);
   }
 
@@ -2740,7 +2747,8 @@ function buildRouterValue(
     defaultLocale,
     domainLocales,
     isReady,
-    isPreview: false,
+    isPreview:
+      typeof window !== "undefined" ? nextData?.isPreview === true : _ssrState?.isPreview === true,
     isFallback:
       typeof window !== "undefined"
         ? nextData?.isFallback === true
@@ -3881,7 +3889,13 @@ const Router: typeof RouterMethods & Omit<NextRouter, keyof typeof RouterMethods
         );
       },
     },
-    isPreview: { enumerable: true, value: false, writable: false },
+    isPreview: {
+      enumerable: true,
+      get(): boolean {
+        if (typeof window === "undefined") return _getSSRContext()?.isPreview === true;
+        return (window.__NEXT_DATA__ as VinextNextData | undefined)?.isPreview === true;
+      },
+    },
     isFallback: {
       enumerable: true,
       get(): boolean {
