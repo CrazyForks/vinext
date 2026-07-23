@@ -2438,6 +2438,102 @@ describe("app page route wiring helpers", () => {
     expect(body).toContain("Blog page");
   });
 
+  // Ported from Next.js: test/e2e/app-dir/metadata-streaming/metadata-streaming.test.ts
+  // https://github.com/vercel/next.js/blob/v16.2.6/test/e2e/app-dir/metadata-streaming/metadata-streaming.test.ts
+  it("wraps the streaming metadata outlet in the built-in not-found boundary", () => {
+    const elements = buildAppPageElements({
+      element: createElement(PageProbe),
+      makeThenableParams(params) {
+        return Promise.resolve(params);
+      },
+      matchedParams: {},
+      resolvedMetadata: null,
+      resolvedViewport: {},
+      streamingMetadataOutlet: Promise.resolve(null),
+      streamingMetadataOutletSuspended: true,
+      route: {
+        error: null,
+        errors: [null],
+        layoutTreePositions: [0],
+        layouts: [{ default: RootLayout }],
+        loading: null,
+        notFound: null,
+        notFounds: [null],
+        routeSegments: ["metadata-not-found"],
+        slots: {},
+        templateTreePositions: [],
+        templates: [],
+      },
+      routePath: "/metadata-not-found",
+      rootNotFoundModule: null,
+    });
+
+    const notFoundBoundary = findElementByTypeName(
+      elements["route:/metadata-not-found"],
+      "NotFoundBoundary",
+    );
+
+    expect(notFoundBoundary).not.toBeNull();
+    if (!notFoundBoundary) throw new Error("Expected the built-in not-found boundary");
+    expect(getElementTypeName((notFoundBoundary.props.fallback as ReactElement).type)).toBe(
+      "DefaultNotFound",
+    );
+    expect(
+      findSlotById(
+        notFoundBoundary.props.children,
+        "__vinext_streaming_metadata_outlet:route:/metadata-not-found",
+      ),
+    ).not.toBeNull();
+  });
+
+  it("owns the built-in not-found boundary at the root layout", () => {
+    const elements = buildAppPageElements({
+      element: createElement(PageProbe),
+      makeThenableParams(params) {
+        return Promise.resolve(params);
+      },
+      matchedParams: {},
+      resolvedMetadata: null,
+      resolvedViewport: {},
+      route: {
+        error: null,
+        errors: [null, null],
+        layoutTreePositions: [0, 1],
+        layouts: [{ default: RootLayout }, { default: GroupLayout }],
+        loading: null,
+        notFound: null,
+        notFounds: [null, null],
+        routeSegments: ["dashboard", "reports"],
+        slots: {},
+        templateTreePositions: [],
+        templates: [],
+      },
+      routePath: "/dashboard/reports",
+      rootNotFoundModule: null,
+    });
+
+    const routeEntry = elements["route:/dashboard/reports"];
+    const rootLayoutSlot = findSlotById(routeEntry, "layout:/");
+    const nestedLayoutSlot = findSlotById(routeEntry, "layout:/dashboard");
+    expect(rootLayoutSlot).not.toBeNull();
+    expect(nestedLayoutSlot).not.toBeNull();
+    if (!rootLayoutSlot || !nestedLayoutSlot) {
+      throw new Error("Expected both root and nested layout slots");
+    }
+
+    const rootNotFoundBoundary = findElementByTypeName(
+      rootLayoutSlot.props.children,
+      "NotFoundBoundary",
+    );
+    expect(rootNotFoundBoundary).not.toBeNull();
+    if (!rootNotFoundBoundary) throw new Error("Expected the built-in not-found boundary");
+    expect(getElementTypeName((rootNotFoundBoundary.props.fallback as ReactElement).type)).toBe(
+      "DefaultNotFound",
+    );
+    expect(findSlotById(rootNotFoundBoundary.props.children, "layout:/dashboard")).not.toBeNull();
+    expect(findElementByTypeName(nestedLayoutSlot.props.children, "NotFoundBoundary")).toBeNull();
+  });
+
   it("nests per-segment NotFoundBoundary inside the template wrapper", () => {
     function RootNotFound() {
       return createElement("div", { "data-not-found": "root" }, "Not Found");

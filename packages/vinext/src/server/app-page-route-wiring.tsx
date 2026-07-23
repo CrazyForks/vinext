@@ -20,6 +20,7 @@ import {
 } from "vinext/shims/error-boundary";
 import { AppRouterScrollTarget } from "vinext/shims/app-router-scroll";
 import DefaultGlobalError from "vinext/shims/default-global-error";
+import DefaultNotFound from "vinext/shims/default-not-found";
 import type { AppRouteSemanticIds } from "../routing/app-route-graph.js";
 import { LayoutSegmentProvider } from "vinext/shims/layout-segment-context";
 import {
@@ -75,6 +76,7 @@ type AppPageComponent = ComponentType<AppPageComponentProps>;
 type AppPageErrorComponent = ComponentType<{ error: unknown; reset: () => void }>;
 const APP_PAGE_LAYOUT_PROBE_CHILD = <Fragment />;
 const DEFAULT_GLOBAL_ERROR_COMPONENT = DefaultGlobalError as AppPageErrorComponent;
+const DEFAULT_NOT_FOUND_COMPONENT = DefaultNotFound as AppPageComponent;
 
 function resolveSlotLayoutParams(
   routeSegments: readonly string[],
@@ -1425,8 +1427,18 @@ export function buildAppPageElements<
     errorEntries.length > 0 ? errorEntries[errorEntries.length - 1].errorModule : null;
   // Next.js nesting (outer to inner): Error > Unauthorized > Forbidden > NotFound > children.
   // Building bottom-up means NotFoundBoundary must wrap first, then Forbidden, Unauthorized, Error.
-  const notFoundComponent =
+  // Next's app loader injects its built-in not-found convention when the app has
+  // no custom fallback. Keep the equivalent boundary around late client-side
+  // signals such as a streaming MetadataOutlet rejection.
+  const configuredNotFoundComponent =
     getDefaultExport(options.route.notFound) ?? getDefaultExport(options.rootNotFoundModule);
+  // The built-in convention belongs to the root layout's children slot. Keep
+  // the route-level fallback only for layoutless synthetic/test routes.
+  const defaultNotFoundOwnerLayoutId =
+    configuredNotFoundComponent === null ? (layoutEntries[0]?.id ?? null) : null;
+  const notFoundComponent =
+    configuredNotFoundComponent ??
+    (defaultNotFoundOwnerLayoutId === null ? DEFAULT_NOT_FOUND_COMPONENT : null);
   if (notFoundComponent) {
     const NotFoundComponent = notFoundComponent;
     routeChildren = (
@@ -1504,7 +1516,9 @@ export function buildAppPageElements<
     // Building bottom-up means Loading must wrap the leaf subtree first, then
     // access/error boundaries, Template, and finally the Layout slot.
     if (layoutEntry) {
-      const layoutNotFoundComponent = getDefaultExport(layoutEntry.notFoundModule);
+      const layoutNotFoundComponent =
+        getDefaultExport(layoutEntry.notFoundModule) ??
+        (layoutEntry.id === defaultNotFoundOwnerLayoutId ? DEFAULT_NOT_FOUND_COMPONENT : null);
       if (layoutNotFoundComponent) {
         const LayoutNotFoundComponent = layoutNotFoundComponent;
         segmentChildren = (
